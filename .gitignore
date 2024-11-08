@@ -1,0 +1,16 @@
+__pycache__
+
+.vscode
+
+bertax_pytorch
+
+*.pth
+*.npy
+*.pt
+*.bin
+*.fa
+*.log
+*.zip
+*.tar.gz
+output
+visualize
