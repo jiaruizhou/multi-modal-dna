@@ -149,6 +149,7 @@ def get_args_parser():
 
     parser.add_argument('--train_vit', action='store_true', help='train the vit')
     parser.add_argument('--train_bert', action='store_true', help='train the vit')
+    parser.add_argument('--pooling_method', default='cls_output', choices=["cls_output", "pooler_output", "average_pooling"], help='the bert feature')
     parser.add_argument('--visual_token_nums', default=65, type=int)
     parser.add_argument('--text_token_nums', default=502, type=int)
     parser.add_argument('--vl_hidden_dim', default=256, type=int, help='Size of the embeddings (dimension of the vision-language transformer)')

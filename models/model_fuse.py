@@ -64,7 +64,7 @@ class fuse_dna_model(nn.Module):
 
     def __init__(self, args):
         super(fuse_dna_model,self).__init__()
-        
+        self.pooling_method = args.pooling_method
         self.global_pooling_vit_bert = args.global_pooling_vit_bert
         self.hidden_dim = args.vl_hidden_dim
 
@@ -124,7 +124,15 @@ class fuse_dna_model(nn.Module):
             outputs = self.mlp(vl_feature)
         else:
             visual_feature = visual_src  # global pool without cls token [B, vl_dim]
-            text_feature = pooler_text_src # [B, vl_dim]
+            
+            if self.pooling_method == "cls_output":
+                text_feature = text_src[:, 0]
+            elif self.pooling_method == "pooler_output":
+                text_feature = pooler_text_src # [B, vl_dim]
+            elif self.pooling_method == "average_pooling":
+                text_feature = text_src[:,1:].mean(dim=1) # TODO handle padding
+            else:
+                raise NotImplementedError(f"Unsupported pooling method: {self.pooling_method}")
             vl_feature = torch.cat([visual_feature,text_feature],dim=-1)
             outputs = self.mlp(vl_feature)
         return outputs
