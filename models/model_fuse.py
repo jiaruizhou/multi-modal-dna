@@ -83,9 +83,7 @@ class fuse_dna_model(nn.Module):
         if not args.train_vit:
             for parameter in self.visualmodel.parameters():
                 parameter.requires_grad_(False)
-        else:
-            del self.visualmodel.head
-            del self.visualmodel.norm
+
 
         if not self.global_pooling_vit_bert:
             num_total = args.text_token_nums + args.visual_token_nums + 1 # 502 + 65 +1
@@ -198,5 +196,8 @@ def build_vit_model(args):
     )
 
     misc.load_vit_model(args=args, model_without_ddp=vit_model)
+
+    del vit_model.head
+    del vit_model.norm
 
     return vit_model

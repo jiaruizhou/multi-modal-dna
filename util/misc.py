@@ -295,11 +295,11 @@ def load_vit_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
 
     print("Load pre-trained checkpoint from: %s" % args.vit_resume)
     checkpoint_model = checkpoint['model']
-    state_dict = model_without_ddp.state_dict()
-    for k in ['head.weight', 'head.bias']:
-        if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
-            print(f"Removing key {k} from pretrained checkpoint")
-            del checkpoint_model[k]
+    # state_dict = model_without_ddp.state_dict()
+    # for k in ['head.weight', 'head.bias']:
+    #     if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+    #         print(f"Removing key {k} from pretrained checkpoint")
+    #         del checkpoint_model[k]
 
     # interpolate position embedding
     interpolate_pos_embed(model_without_ddp, checkpoint_model)
@@ -307,7 +307,10 @@ def load_vit_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
     # load pre-trained model
     msg = model_without_ddp.load_state_dict(checkpoint_model, strict=False)
     print(msg)
-    assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
+    # assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
+
+    # manually initialize fc layer
+    # trunc_normal_(model_without_ddp.head.weight, std=2e-5)
     
 def load_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
     if args.resume:
