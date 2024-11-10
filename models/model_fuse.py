@@ -108,7 +108,7 @@ class fuse_dna_model(nn.Module):
         B = visual_data.shape[0]
         # visual backbone
         visual_src = self.visualmodel(visual_data) # [B, 65, 768]
-        text_outputs = self.textmodel(text_data[0].squeeze(1), text_data[1].squeeze(1)) # text_data.shape [B, 1, 502])
+        text_outputs = self.textmodel(text_data[0].squeeze(1), token_type_ids=text_data[1].squeeze(1)) # text_data.shape [B, 1, 502])
         text_src, pooler_text_src = text_outputs.last_hidden_state, text_outputs.pooler_output
 
         if not self.global_pooling_vit_bert:
