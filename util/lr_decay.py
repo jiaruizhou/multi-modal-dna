@@ -17,6 +17,7 @@ def param_groups_lrd(model, weight_decay=0.05, no_weight_decay_list=[], layer_de
     """
     param_group_names = {}
     param_groups = {}
+    reached_no_weight_decay_list = set()
 
     num_layers = len(model.visualmodel.blocks) + 1
 
@@ -30,6 +31,8 @@ def param_groups_lrd(model, weight_decay=0.05, no_weight_decay_list=[], layer_de
         if p.ndim == 1 or n in no_weight_decay_list:
             g_decay = "no_decay"
             this_decay = 0.
+            if n in no_weight_decay_list:
+                reached_no_weight_decay_list.add(n)
         else:
             g_decay = "decay"
             this_decay = weight_decay
@@ -70,7 +73,8 @@ def param_groups_lrd(model, weight_decay=0.05, no_weight_decay_list=[], layer_de
         param_groups[group_name]["params"].append(p)
 
     # print("parameter groups: \n%s" % json.dumps(param_group_names, indent=2))
-
+    if reached_no_weight_decay_list != set(no_weight_decay_list):
+        print(f"[Warning]: Not all no_weight_decay valid. Invalid parameters: {set(no_weight_decay_list) - reached_no_weight_decay_list}")
     return list(param_groups.values())
 # def param_groups_lrd(model, weight_decay=0.05, no_weight_decay_list=[], layer_decay=.75):
 #     """
