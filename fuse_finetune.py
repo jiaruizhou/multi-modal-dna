@@ -157,8 +157,8 @@ def train_one_epoch(model: torch.nn.Module,
         loss1 /= accum_iter
         loss2 /= accum_iter
         loss3 /= accum_iter
-        with torch.autograd.detect_anomaly():
-            loss_scaler(loss, optimizer, clip_grad=max_norm, parameters=model.parameters(), create_graph=False, update_grad=(data_iter_step + 1) % accum_iter == 0)
+        # with torch.autograd.detect_anomaly():
+        loss_scaler(loss, optimizer, clip_grad=max_norm, parameters=model.parameters(), create_graph=False, update_grad=(data_iter_step + 1) % accum_iter == 0)
 
         if (data_iter_step + 1) % accum_iter == 0:
             optimizer.zero_grad()
