@@ -25,6 +25,8 @@ def param_groups_lrd(model, weight_decay=0.05, no_weight_decay_list=[], layer_de
 
     for n, p in model.named_parameters():
         if not p.requires_grad:
+            if n in set(no_weight_decay_list):
+                reached_no_weight_decay_list.add(n)
             continue
 
         # no decay: all 1D parameters and model specific ones
