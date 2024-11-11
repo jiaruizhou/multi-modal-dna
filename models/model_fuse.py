@@ -166,6 +166,10 @@ class Classification_Head(nn.Module):
         self.fc_norm2 = nn.LayerNorm(self.head2.in_features)
         self.fc_norm3 = nn.LayerNorm(self.head3.in_features)
 
+        trunc_normal_(self.head.weight, std=2e-5)
+        if args.all_head_trunc:
+            trunc_normal_(self.head2.weight, std=2e-5)
+            trunc_normal_(self.head3.weight, std=2e-5)
     
     def forward(self,src):
 

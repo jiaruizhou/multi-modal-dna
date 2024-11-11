@@ -158,6 +158,8 @@ def get_args_parser():
     parser.add_argument('--vl_dim_feedforward', default=1024, type=int, help="Intermediate size of the feedforward layers in the vision-language transformer blocks")
     parser.add_argument('--vl_enc_layers', default=1, type=int, help='Number of encoders in the vision-language transformer')
     parser.add_argument('--single_gpu', action='store_true', help='Use single GPU to train')
+    parser.add_argument('--all_head_trunc', action='store_true', help='Use trunc norm for all mlp head')
+
     
     return parser
 
