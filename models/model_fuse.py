@@ -139,11 +139,12 @@ class fuse_dna_model(nn.Module):
     
     @torch.jit.ignore
     def no_weight_decay(self):
-        bert_layer_norm_bias = [n for n in self.named_parameters() if "bias" in n and 'LayerNorm' in n and 'textmodel' in n]
-        vit_layer_norm_bias = [n for n in self.named_parameters() if "bias" in n and 'norm' in n and 'viusalmodel' in n]
-        cls_token = ['cls_token', 'visualmodel.cls_token']
-        pos_embed = ['textmodel.bert.embeddings.position_embeddings.weight', 'visualmodel.pos_embed', 'vl_pos_embed.weight']
-        no_decay = bert_layer_norm_bias + vit_layer_norm_bias + pos_embed + cls_token
+        # bert_layer_norm_bias = [n for n in self.named_parameters() if "bias" in n and 'LayerNorm' in n and 'textmodel' in n]
+        # vit_layer_norm_bias = [n for n in self.named_parameters() if "bias" in n and 'norm' in n and 'viusalmodel' in n]
+        # cls_token = ['visualmodel.cls_token']
+        # pos_embed = ['textmodel.embeddings.position_embeddings.weight', 'visualmodel.pos_embed']
+        # no_decay = bert_layer_norm_bias + vit_layer_norm_bias + pos_embed + cls_token
+        no_decay = ['visualmodel.cls_token', 'visualmodel.pos_embed']
         return set(no_decay)
 
 class Classification_Head(nn.Module):
