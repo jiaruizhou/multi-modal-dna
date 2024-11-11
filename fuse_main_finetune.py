@@ -16,6 +16,7 @@ import timm.optim.optim_factory as optim_factory
 import os
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import time
+import random
 from pathlib import Path
 
 import torch
@@ -113,8 +114,6 @@ def get_args_parser():
     # DNA data set
     parser.add_argument('--data', default="", type=str, help="the dataset name for tax")
     parser.add_argument('--kmer', default=5, type=int, help="the k-mer size of fcgr")  # input size 2**k x 2**k
-    parser.add_argument('--tax_rank', default="phylum")  #['superkingdom', 'kingdom', 'phylum', 'family']
-    
 
     # Dataset parameters
     parser.add_argument('--data_path', default='./data/', type=str, help='dataset path')
@@ -160,6 +159,8 @@ def get_args_parser():
     parser.add_argument('--single_gpu', action='store_true', help='Use single GPU to train')
     parser.add_argument('--all_head_trunc', action='store_true', help='Use trunc norm for all mlp head')
 
+    parser.add_argument('--correct_data', action='store_true')
+    parser.add_argument('--benchmark', action='store_true')
     
     return parser
 
@@ -181,13 +182,23 @@ def main(args):
 
     device = torch.device(args.device)
 
-    # fix the seed for reproducibility
-    seed = args.seed + misc.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+
+
+    if args.correct_data:
+        # fix the seed for reproducibility
+        seed = args.seed
+        random.seed(seed)
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+    else:
+        # fix the seed for reproducibility
+        seed = args.seed + misc.get_rank()
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+    cudnn.benchmark = args.benchmark
 
     if not args.eval:
-        # if "all" in args.tax_rank:
         dataset = Visual_Text_Dataset(args, files=args.data_path, kmer=args.kmer, phase="train")
 
         train_size = int(0.95 * len(dataset))
@@ -204,11 +215,18 @@ def main(args):
     fuse_model = fuse_dna_model(args)
     fuse_model.to(device)
 
+    if args.correct_data:
+        # fix the seed for reproducibility
+        seed = args.seed + misc.get_rank()
+        random.seed(seed)
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
         global_rank = misc.get_rank()
         if not args.eval:
-            print("dataset {} for {} in {} is ready".format(args.data_path, args.kmer, args.tax_rank))
+            print("dataset {} for {} is ready".format(args.data_path, args.kmer))
             sampler_train = torch.utils.data.DistributedSampler(dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True)
             print("Sampler_train = %s" % str(sampler_train))
         if args.dist_eval:
@@ -248,7 +266,7 @@ def main(args):
     model_without_ddp = fuse_model
     n_parameters = sum(p.numel() for p in fuse_model.parameters() if p.requires_grad)
 
-    print("Model = %s" % str(model_without_ddp))
+    # print("Model = %s" % str(model_without_ddp))
     print('number of params (M): %.2f' % (n_parameters / 1.e6))
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
