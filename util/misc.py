@@ -18,7 +18,7 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-from torch._six import inf
+from torch import inf
 
 from util.pos_embed import interpolate_pos_embed
 
@@ -222,7 +222,9 @@ def init_distributed_mode(args):
     torch.cuda.set_device(args.gpu)
     args.dist_backend = 'nccl'
     print('| distributed init (rank {}): {}, gpu {}'.format(args.rank, args.dist_url, args.gpu), flush=True)
-    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url, world_size=args.world_size, rank=args.rank)
+    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url, 
+                                         world_size=args.world_size, rank=args.rank, 
+                                         device_id=torch.device(f"cuda:{args.gpu}"))
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
 
@@ -230,8 +232,8 @@ def init_distributed_mode(args):
 class NativeScalerWithGradNormCount:
     state_dict_key = "amp_scaler"
 
-    def __init__(self):
-        self._scaler = torch.cuda.amp.GradScaler()
+    def __init__(self, loss_scale=False):
+        self._scaler = torch.amp.GradScaler('cuda', enabled=loss_scale)
 
     def __call__(self, loss, optimizer, clip_grad=None, parameters=None, create_graph=False, update_grad=True):
         self._scaler.scale(loss).backward(create_graph=create_graph)

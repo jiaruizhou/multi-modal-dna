@@ -24,10 +24,8 @@ import torch.backends
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
-import timm
 
 # assert timm.__version__ == "0.3.2"  # version check
-from timm.models.layers import trunc_normal_
 from timm.data.mixup import Mixup
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 
@@ -38,7 +36,6 @@ import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 import models.models_vit as models_vit
-from models.model_bert import Bert_Model
 from models.model_fuse import fuse_dna_model
 
 from fuse_finetune import train_one_epoch, evaluate
@@ -107,7 +104,7 @@ def get_args_parser():
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
-    parser.add_argument('--local_rank', default=-1, type=int)
+    parser.add_argument('--local-rank', default=-1, type=int)
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
 
@@ -159,8 +156,8 @@ def get_args_parser():
     parser.add_argument('--single_gpu', action='store_true', help='Use single GPU to train')
     parser.add_argument('--all_head_trunc', action='store_true', help='Use trunc norm for all mlp head')
 
-    parser.add_argument('--correct_data', action='store_true')
-    parser.add_argument('--benchmark', action='store_true')
+    parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
+    parser.add_argument('--loss_scale', action='store_true', help='Enable loss scaling')
     
     return parser
 
@@ -182,21 +179,12 @@ def main(args):
 
     device = torch.device(args.device)
 
-
-
-    if args.correct_data:
-        # fix the seed for reproducibility
-        seed = args.seed
-        random.seed(seed)
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-    else:
-        # fix the seed for reproducibility
-        seed = args.seed + misc.get_rank()
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-
-    cudnn.benchmark = args.benchmark
+    # fix the seed for reproducibility
+    # We do not add RANK to seed for correct data spliting in distributed training.
+    seed = args.seed
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
     if not args.eval:
         dataset = Visual_Text_Dataset(args, files=args.data_path, kmer=args.kmer, phase="train")
@@ -215,12 +203,11 @@ def main(args):
     fuse_model = fuse_dna_model(args)
     fuse_model.to(device)
 
-    if args.correct_data:
-        # fix the seed for reproducibility
-        seed = args.seed + misc.get_rank()
-        random.seed(seed)
-        torch.manual_seed(seed)
-        np.random.seed(seed)
+    # fix the seed for reproducibility
+    seed = args.seed + misc.get_rank()
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -288,7 +275,7 @@ def main(args):
 
     param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay, no_weight_decay_list=model_without_ddp.no_weight_decay(), layer_decay=args.layer_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
-    loss_scaler = NativeScaler()
+    loss_scaler = NativeScaler(loss_scale=args.loss_scale)
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
@@ -326,10 +313,8 @@ def main(args):
         test_stats = evaluate(args, data_loader_val, fuse_model, device)
 
         if log_writer is not None:
-            log_writer.add_scalar('perf/test_acc1_2', test_stats['acc1_2'], epoch)
-            log_writer.add_scalar('perf/test_acc5_2', test_stats['acc5_2'], epoch)
-            log_writer.add_scalar('perf/test_avep_2', test_stats['avep2'], epoch)
-            log_writer.add_scalar('perf/test_loss_2', test_stats['loss2'], epoch)
+            for k in test_stats:
+                log_writer.add_scalar(f'perf/test_{k}', test_stats[k], epoch)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()}, **{f'test_{k}': v for k, v in test_stats.items()}, 'epoch': epoch, 'n_parameters': n_parameters}
 
@@ -347,6 +332,7 @@ def main(args):
 if __name__ == '__main__':
     args = get_args_parser()
     args = args.parse_args()
+    assert (args.amp and args.loss_scale) or (not args.amp and not args.loss_scale), "Mixed precision training requires loss scaling"
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

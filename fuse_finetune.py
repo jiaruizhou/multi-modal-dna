@@ -50,7 +50,6 @@ def to_device(x, device, non_blocking=True):
         raise ValueError(f"Unsupported type: {type(x)}")
     return x
 
-from tqdm import tqdm
 def has_nan(x):
     if isinstance(x, torch.Tensor):
         return torch.any(torch.isnan(x)) or torch.any(torch.isinf(x))
@@ -60,36 +59,6 @@ def has_nan(x):
         return any([has_nan(v) for v in x.values()])
     else:
         raise ValueError(f"Unsupported type: {type(x)}")
-
-    # for data_iter_step, (samples, targets) in enumerate(tqdm(data_loader)):
-    #     if has_nan(samples) or has_nan(targets):
-    #         print("!!!!!!!!!!!!!!!!!")
-    #         exit()
-
-    #     # we use a per iteration (instead of per epoch) lr scheduler
-    #     if data_iter_step % accum_iter == 0:
-    #         lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
-        
-    #         #  (fcgr,(token_id,token_ids))
-    #     samples = to_device(samples, device, non_blocking=True)
-
-    #     # targets = targets.to(device, non_blocking=True)
-    #     targets1, targets2, targets3 = targets
-    #     targets1, targets2, targets3 = targets1.to(device, non_blocking=True), targets2.to(device, non_blocking=True), targets3.to(device, non_blocking=True)
-    #     if mixup_fn is not None:
-    #         samples, targets = mixup_fn(samples, targets)
-
-    #     with torch.cuda.amp.autocast():
-    #         outputs1, outputs2, outputs3 = model(samples)
-    #         loss1 = criterion(outputs1, targets1)
-    #         loss2 = criterion(outputs2, targets2)
-    #         loss3 = criterion(outputs3, targets3)
-    #         loss = (loss1 + loss2 + loss3) / 3
-
-    #     if has_nan(loss):
-    #         print("??????????????????")
-    #         exit()
-    #     loss_value = loss.item()
 
 def unwrap_ddp(model):
     if hasattr(model, "module"):
@@ -137,15 +106,21 @@ def train_one_epoch(model: torch.nn.Module,
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', enabled=args.amp):
             outputs1, outputs2, outputs3 = model(samples)
             loss1 = criterion(outputs1, targets1)
             loss2 = criterion(outputs2, targets2)
             loss3 = criterion(outputs3, targets3)
             loss = (loss1 + loss2 + loss3) / 3
 
-        loss_value = loss.item()
+        loss1_value = loss1.item()
+        loss1_value_reduce = misc.all_reduce_mean(loss1_value)
+        loss2_value = loss2.item()
+        loss2_value_reduce = misc.all_reduce_mean(loss2_value)
+        loss3_value = loss3.item()
+        loss3_value_reduce = misc.all_reduce_mean(loss3_value)
 
+        loss_value = loss.item()
         loss_value_reduce = misc.all_reduce_mean(loss_value)
         if not math.isfinite(loss_value_reduce):
             print("[Warning] Loss is {}, skipped.".format(loss_value))
@@ -154,9 +129,6 @@ def train_one_epoch(model: torch.nn.Module,
             torch.distributed.barrier()
 
         loss /= accum_iter
-        loss1 /= accum_iter
-        loss2 /= accum_iter
-        loss3 /= accum_iter
         # with torch.autograd.detect_anomaly():
         loss_scaler(loss, optimizer, clip_grad=max_norm, parameters=model.parameters(), create_graph=False, update_grad=(data_iter_step + 1) % accum_iter == 0)
 
@@ -176,12 +148,12 @@ def train_one_epoch(model: torch.nn.Module,
 
         
         if log_writer is not None and (data_iter_step + 1) % accum_iter == 0:
-            """ We use epoch_1000x as the x-axis in tensorboard.
-            This calibrates different curves when batch size changes.
-            """
-            epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
-            log_writer.add_scalar('loss', loss_value_reduce, epoch_1000x)
-            log_writer.add_scalar('lr', max_lr, epoch_1000x)
+            global_step = epoch * len(data_loader) // accum_iter + data_iter_step // accum_iter
+            log_writer.add_scalar('train/loss', loss_value_reduce, global_step)
+            log_writer.add_scalar('train/loss1', loss1_value_reduce, global_step)
+            log_writer.add_scalar('train/loss2', loss2_value_reduce, global_step)
+            log_writer.add_scalar('train/loss3', loss3_value_reduce, global_step)
+            log_writer.add_scalar('train/lr', max_lr, global_step)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -210,7 +182,7 @@ def evaluate(args, data_loader, model, device):
         target1, target2, target3 = target1.to(device, non_blocking=True), \
             target2.to(device, non_blocking=True), target3.to(device, non_blocking=True)
         # compute output
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', enabled=args.amp):
             output = model(images)
             outputs[0].extend(output[0])
             outputs[1].extend(output[1])
@@ -273,7 +245,7 @@ def get_encoded(args, data_loader, model, device):
         idx = batch[1]
         images = images.to(device, non_blocking=True)
         # compute output
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', enabled=args.amp):
             _, _, _, latent = model(images)
             features.extend(latent.unsqueeze(1).cpu())
             labels1.extend(idx[0])
