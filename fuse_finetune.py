@@ -79,7 +79,7 @@ def has_nan(x):
     #     if mixup_fn is not None:
     #         samples, targets = mixup_fn(samples, targets)
 
-    #     with torch.cuda.amp.autocast():
+    #     with torch.amp.autocast('cuda', enabled=args.amp):
     #         outputs1, outputs2, outputs3 = model(samples)
     #         loss1 = criterion(outputs1, targets1)
     #         loss2 = criterion(outputs2, targets2)
@@ -137,7 +137,7 @@ def train_one_epoch(model: torch.nn.Module,
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', enabled=args.amp):
             outputs1, outputs2, outputs3 = model(samples)
             loss1 = criterion(outputs1, targets1)
             loss2 = criterion(outputs2, targets2)
@@ -210,7 +210,7 @@ def evaluate(args, data_loader, model, device):
         target1, target2, target3 = target1.to(device, non_blocking=True), \
             target2.to(device, non_blocking=True), target3.to(device, non_blocking=True)
         # compute output
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', enabled=args.amp):
             output = model(images)
             outputs[0].extend(output[0])
             outputs[1].extend(output[1])
@@ -273,7 +273,7 @@ def get_encoded(args, data_loader, model, device):
         idx = batch[1]
         images = images.to(device, non_blocking=True)
         # compute output
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', enabled=args.amp):
             _, _, _, latent = model(images)
             features.extend(latent.unsqueeze(1).cpu())
             labels1.extend(idx[0])

@@ -107,7 +107,7 @@ def get_args_parser():
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
-    parser.add_argument('--local_rank', default=-1, type=int)
+    parser.add_argument('--local-rank', default=-1, type=int)
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
 
@@ -161,6 +161,8 @@ def get_args_parser():
 
     parser.add_argument('--correct_data', action='store_true')
     parser.add_argument('--benchmark', action='store_true')
+    parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
+    parser.add_argument('--loss_scale', action='store_true', help='Enable loss scaling')
     
     return parser
 
@@ -288,7 +290,7 @@ def main(args):
 
     param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay, no_weight_decay_list=model_without_ddp.no_weight_decay(), layer_decay=args.layer_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
-    loss_scaler = NativeScaler()
+    loss_scaler = NativeScaler(loss_scale=args.loss_scale)
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
@@ -347,6 +349,7 @@ def main(args):
 if __name__ == '__main__':
     args = get_args_parser()
     args = args.parse_args()
+    assert (args.amp and args.loss_scale) or (not args.amp and not args.loss_scale), "Mixed precision training requires loss scaling"
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
