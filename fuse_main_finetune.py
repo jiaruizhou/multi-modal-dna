@@ -158,8 +158,6 @@ def get_args_parser():
     parser.add_argument('--single_gpu', action='store_true', help='Use single GPU to train')
     parser.add_argument('--all_head_trunc', action='store_true', help='Use trunc norm for all mlp head')
 
-    parser.add_argument('--correct_data', action='store_true')
-    parser.add_argument('--benchmark', action='store_true')
     parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
     parser.add_argument('--loss_scale', action='store_true', help='Enable loss scaling')
     
@@ -183,21 +181,12 @@ def main(args):
 
     device = torch.device(args.device)
 
-
-
-    if args.correct_data:
-        # fix the seed for reproducibility
-        seed = args.seed
-        random.seed(seed)
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-    else:
-        # fix the seed for reproducibility
-        seed = args.seed + misc.get_rank()
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-
-    cudnn.benchmark = args.benchmark
+    # fix the seed for reproducibility
+    # We do not add RANK to seed for correct data spliting in distributed training.
+    seed = args.seed
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
     if not args.eval:
         dataset = Visual_Text_Dataset(args, files=args.data_path, kmer=args.kmer, phase="train")
@@ -216,12 +205,11 @@ def main(args):
     fuse_model = fuse_dna_model(args)
     fuse_model.to(device)
 
-    if args.correct_data:
-        # fix the seed for reproducibility
-        seed = args.seed + misc.get_rank()
-        random.seed(seed)
-        torch.manual_seed(seed)
-        np.random.seed(seed)
+    # fix the seed for reproducibility
+    seed = args.seed + misc.get_rank()
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
