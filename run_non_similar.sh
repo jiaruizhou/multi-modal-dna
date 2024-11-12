@@ -8,7 +8,7 @@ DATA="non_similar"
 CKPT_NUM=0
 mkdir -p ./output/$MODEL/$DATA 
 
-python -m torch.distributed.launch --nproc_per_node 4 fuse_main_finetune.py \
+python -m torch.distributed.run --nproc_per_node 4 fuse_main_finetune.py \
     --lr 1e-4 \
     --warmup_epochs 1 \
     --epochs 10 \
