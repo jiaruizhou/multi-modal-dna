@@ -9,7 +9,7 @@ import timm
 import copy
 import models.models_vit as models_vit
 from transformers import BertModel
-from timm.models.layers import trunc_normal_
+from timm.layers import trunc_normal_
 import util.misc as misc
 
 class vl_encoder(nn.Module):

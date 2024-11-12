@@ -25,6 +25,5 @@ python -m torch.distributed.launch --nproc_per_node 4 fuse_main_finetune.py \
     --smoothing 0.1 \
     --train_vit \
     --pooling_method cls_output \
-    --correct_data \
     --amp --loss_scale \
     2>&1 | tee ./output/$MODEL/$DATA/training.log

@@ -50,7 +50,6 @@ def to_device(x, device, non_blocking=True):
         raise ValueError(f"Unsupported type: {type(x)}")
     return x
 
-from tqdm import tqdm
 def has_nan(x):
     if isinstance(x, torch.Tensor):
         return torch.any(torch.isnan(x)) or torch.any(torch.isinf(x))
@@ -60,36 +59,6 @@ def has_nan(x):
         return any([has_nan(v) for v in x.values()])
     else:
         raise ValueError(f"Unsupported type: {type(x)}")
-
-    # for data_iter_step, (samples, targets) in enumerate(tqdm(data_loader)):
-    #     if has_nan(samples) or has_nan(targets):
-    #         print("!!!!!!!!!!!!!!!!!")
-    #         exit()
-
-    #     # we use a per iteration (instead of per epoch) lr scheduler
-    #     if data_iter_step % accum_iter == 0:
-    #         lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
-        
-    #         #  (fcgr,(token_id,token_ids))
-    #     samples = to_device(samples, device, non_blocking=True)
-
-    #     # targets = targets.to(device, non_blocking=True)
-    #     targets1, targets2, targets3 = targets
-    #     targets1, targets2, targets3 = targets1.to(device, non_blocking=True), targets2.to(device, non_blocking=True), targets3.to(device, non_blocking=True)
-    #     if mixup_fn is not None:
-    #         samples, targets = mixup_fn(samples, targets)
-
-    #     with torch.amp.autocast('cuda', enabled=args.amp):
-    #         outputs1, outputs2, outputs3 = model(samples)
-    #         loss1 = criterion(outputs1, targets1)
-    #         loss2 = criterion(outputs2, targets2)
-    #         loss3 = criterion(outputs3, targets3)
-    #         loss = (loss1 + loss2 + loss3) / 3
-
-    #     if has_nan(loss):
-    #         print("??????????????????")
-    #         exit()
-    #     loss_value = loss.item()
 
 def unwrap_ddp(model):
     if hasattr(model, "module"):
