@@ -313,10 +313,8 @@ def main(args):
         test_stats = evaluate(args, data_loader_val, fuse_model, device)
 
         if log_writer is not None:
-            log_writer.add_scalar('perf/test_acc1_2', test_stats['acc1_2'], epoch)
-            log_writer.add_scalar('perf/test_acc5_2', test_stats['acc5_2'], epoch)
-            log_writer.add_scalar('perf/test_avep_2', test_stats['avep2'], epoch)
-            log_writer.add_scalar('perf/test_loss_2', test_stats['loss2'], epoch)
+            for k in test_stats:
+                log_writer.add_scalar(f'perf/test_{k}', test_stats[k], epoch)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()}, **{f'test_{k}': v for k, v in test_stats.items()}, 'epoch': epoch, 'n_parameters': n_parameters}
 
