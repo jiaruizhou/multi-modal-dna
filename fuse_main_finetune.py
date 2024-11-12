@@ -38,7 +38,6 @@ import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 import models.models_vit as models_vit
-from models.model_bert import Bert_Model
 from models.model_fuse import fuse_dna_model
 
 from fuse_finetune import train_one_epoch, evaluate
