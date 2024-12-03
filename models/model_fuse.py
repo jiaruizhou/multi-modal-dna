@@ -1,13 +1,10 @@
 
-from functools import partial
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import timm.models.vision_transformer
-from timm.models.vision_transformer import PatchEmbed
-import timm
 import copy
+
 import models.models_vit as models_vit
+import models.models_mae as models_mae
 from transformers import BertModel
 from timm.layers import trunc_normal_
 import util.misc as misc
@@ -71,19 +68,12 @@ class fuse_dna_model(nn.Module):
         self.textmodel = build_bert_model(args)
         self.visualmodel = build_vit_model(args)
         
-
-
         if not args.train_bert:
             for parameter in self.textmodel.parameters():
                 parameter.requires_grad_(False)
-        # else:
-            # del self.textmodel.bert.pooler.dense
-        
-        
         if not args.train_vit:
             for parameter in self.visualmodel.parameters():
                 parameter.requires_grad_(False)
-
 
         if not self.global_pooling_vit_bert:
             num_total = args.text_token_nums + args.visual_token_nums + 1 # 502 + 65 +1
@@ -214,3 +204,12 @@ def build_vit_model(args):
     del vit_model.norm
 
     return vit_model
+
+
+def build_mae_model(args):
+
+    mae_model = models_mae.__dict__[args.mae_model_name]()
+
+    misc.load_mae_model(args=args, model_without_ddp=mae_model)
+
+    return mae_model

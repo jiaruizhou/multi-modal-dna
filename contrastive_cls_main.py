@@ -26,6 +26,8 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 
 # assert timm.__version__ == "0.3.2"  # version check
+from timm.data.mixup import Mixup
+from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 
 import util.lr_decay as lrd
 import util.misc as misc
@@ -33,16 +35,15 @@ import util.misc as misc
 
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-from models.model_contrastive import contrastive_dna_model
+from models.model_contrastive import class_finetuning
 
-from contrastive_train import train_one_epoch, evaluate
+from fuse_finetune import train_one_epoch, evaluate
 
 from util.custom_datasets import Visual_Text_Dataset
+from util.tax_entry import annotate_predictions
 from torch.utils.data import random_split
 
 import os
-
-from util.contrastive_utils import ContrastiveLoss, InfoNCE, CLIPLoss
 
 # torch.autograd.set_detect_anomaly(True)
 
@@ -61,6 +62,7 @@ def get_args_parser():
     # Augmentation parameters
     parser.add_argument('--color_jitter', type=float, default=None, metavar='PCT', help='Color jitter factor (enabled only when not using Auto/RandAug)')
     parser.add_argument('--aa', type=str, default='rand-m9-mstd0.5-inc1', metavar='NAME', help='Use AutoAugment policy. "v0" or "original". " + "(default: rand-m9-mstd0.5-inc1)'),
+    parser.add_argument('--smoothing', type=float, default=0.0, help='Label smoothing (default: 0.1)')
 
     # * Random Erase params
     parser.add_argument('--reprob', type=float, default=0.25, metavar='PCT', help='Random erase prob (default: 0.25)')
@@ -68,10 +70,21 @@ def get_args_parser():
     parser.add_argument('--recount', type=int, default=1, help='Random erase count (default: 1)')
     parser.add_argument('--resplit', action='store_true', default=False, help='Do not random erase first (clean) augmentation split')
 
+    # * Mixup params
+    parser.add_argument('--mixup', type=float, default=0, help='mixup alpha, mixup enabled if > 0.')
+    parser.add_argument('--cutmix', type=float, default=0, help='cutmix alpha, cutmix enabled if > 0.')
+    parser.add_argument('--cutmix_minmax', type=float, nargs='+', default=None, help='cutmix min/max ratio, overrides alpha and enables cutmix if set (default: None)')
+    parser.add_argument('--mixup_prob', type=float, default=1.0, help='Probability of performing mixup or cutmix when either/both is enabled')
+    parser.add_argument('--mixup_switch_prob', type=float, default=0.5, help='Probability of switching to cutmix when both mixup and cutmix enabled')
+    parser.add_argument('--mixup_mode', type=str, default='batch', help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
+
     # * Finetuning params
     parser.add_argument('--finetune', default='', help='finetune from checkpoint')
     # parser.add_argument('--global_pool', action='store_true')
     # parser.set_defaults(global_pool=False)
+    
+    
+    parser.add_argument('--cls_token', action='store_false', dest='global_pool', help='Use class token instead of global pool for classification')
     
     # training parameters
     parser.add_argument('--batch_size', default=64, type=int, help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
@@ -107,6 +120,7 @@ def get_args_parser():
 
     # vit Model set
     parser.add_argument('--vit_model', default='vit_base_patch4_5mer', type=str, metavar='MODEL', help='Name of model to train')
+    parser.add_argument('--input_size', default=224, type=int, help='images input size')
     parser.add_argument('--cls_num', default=5, help="the class number used for vit head")  #['superkingdom', 'kingdom', 'phylum', 'family']
     parser.add_argument('--vit_resume', default='./output/output_b_p4_5mer/checkpoint-540.pth', help='resume from vit checkpoint')
     parser.add_argument('--vit_embed_dim', default=768, type=int, help='Dimension of the vision transformer')
@@ -116,7 +130,14 @@ def get_args_parser():
     parser.add_argument('--bert_resume', default='./bertax_pytorch', help='resume from bert checkpoint')
     parser.add_argument('--config_path', default='./bertax_pytorch/config.json', help='resume from bert checkpoint')
     parser.add_argument('--bert_embed_dim', default=250, type=int, help='Dimension of the vision transformer')
-     # for vl model
+
+
+    # pooling
+    # parser.add_argument('--classfication_global_pool', action='store_true')
+    # parser.set_defaults(classfication_global_pool=True)
+    parser.add_argument('--global_pooling_vit_bert', action='store_true', help='Use global pooled features of ViT and BERT')
+    parser.add_argument('--global_pool_vit', action='store_true', help='Use global pooled features of ViT')
+    # for vl model
     parser.add_argument('--model', default='fuse', type=str, metavar='MODEL', help='Name of model to train')
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT', help='Drop path rate (default: 0.1)')
     parser.add_argument('--resume', default='', help='resume from fuse model checkpoint')
@@ -124,10 +145,13 @@ def get_args_parser():
     parser.add_argument('--train_vit', action='store_true', help='train the vit')
     parser.add_argument('--train_bert', action='store_true', help='train the vit')
     parser.add_argument('--pooling_method', default='cls_output', choices=["cls_output", "pooler_output", "average_pooling"], help='the bert feature')
-    parser.add_argument('--global_pooling_vit_bert', action='store_true', help='Use global pooled features of ViT and BERT')
-    parser.add_argument('--global_pool_vit', action='store_true', help='Use global pooled features of ViT')
-    
-
+    parser.add_argument('--visual_token_nums', default=65, type=int)
+    parser.add_argument('--text_token_nums', default=502, type=int)
+    parser.add_argument('--vl_hidden_dim', default=256, type=int, help='Size of the embeddings (dimension of the vision-language transformer)')
+    parser.add_argument('--vl_dropout', default=0.1, type=int, help="Dropout applied in the vision-language transformer")
+    parser.add_argument('--vl_nheads', default=8, type=int, help="Number of attention heads inside the vision-language transformer's attentions")
+    parser.add_argument('--vl_dim_feedforward', default=1024, type=int, help="Intermediate size of the feedforward layers in the vision-language transformer blocks")
+    parser.add_argument('--vl_enc_layers', default=1, type=int, help='Number of encoders in the vision-language transformer')
     parser.add_argument('--single_gpu', action='store_true', help='Use single GPU to train')
     parser.add_argument('--all_head_trunc', action='store_true', help='Use trunc norm for all mlp head')
 
@@ -136,15 +160,14 @@ def get_args_parser():
     parser.add_argument('--vit2bert_proj',action='store_true', help='do not use layernorm all mlp head')
     parser.add_argument('--no_norm_before_head',action='store_true', help='do not use layernorm all mlp head')
 
-    parser.add_argument('--loss_fn',default="clip_loss", choices=["contrastive","infonce","clip_loss"], help="The contrastive loss.")
-    parser.add_argument('--cross_process_negatives',action='store_true', help="Gather all negatives from other gpus")
-    parser.add_argument('--use_logit_scale',action='store_true', help="use learnerable temperature for clip loss")
+    parser.add_argument('--contrastive_resume', default='', help='resume from fuse model checkpoint')
+    parser.add_argument('--train_contrastive', action='store_true', help='train the contrastive model')
+
     return parser
 
-
-
 def main(args):
-    args.data_path = os.path.join(args.data_path, args.data + "/")
+    if not args.pred:
+        args.data_path = os.path.join(args.data_path, args.data + "/")
 
     args.output_dir = os.path.join(args.output_dir, args.model,args.data)
     
@@ -180,8 +203,8 @@ def main(args):
     if args.eval:
         dataset_val = Visual_Text_Dataset(args, files=args.data_path, kmer=args.kmer, phase="test")
     
-    contrast_model = contrastive_dna_model(args)
-    contrast_model.to(device)
+    fuse_model = class_finetuning(args)
+    fuse_model.to(device)
 
     # fix the seed for reproducibility
     seed = args.seed + misc.get_rank()
@@ -225,8 +248,13 @@ def main(args):
         
     data_loader_val = torch.utils.data.DataLoader(dataset_val, sampler=sampler_val, batch_size=args.batch_size, num_workers=args.num_workers, pin_memory=args.pin_mem, drop_last=False)
 
-    model_without_ddp = contrast_model
-    n_parameters = sum(p.numel() for p in contrast_model.parameters() if p.requires_grad)
+    mixup_fn = None
+    mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
+    if mixup_active:
+        print("Mixup is activated!")
+        mixup_fn = Mixup(mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax, prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode, label_smoothing=args.smoothing, num_classes=args.nb_classes)
+    model_without_ddp = fuse_model
+    n_parameters = sum(p.numel() for p in fuse_model.parameters() if p.requires_grad)
 
     # print("Model = %s" % str(model_without_ddp))
     print('number of params (M): %.2f' % (n_parameters / 1.e6))
@@ -243,29 +271,34 @@ def main(args):
     print("effective batch size: %d" % eff_batch_size)
 
     if args.distributed:
-        contrast_model = torch.nn.parallel.DistributedDataParallel(contrast_model, device_ids=[args.gpu])
-        model_without_ddp = contrast_model.module
+        fuse_model = torch.nn.parallel.DistributedDataParallel(fuse_model, device_ids=[args.gpu])
+        model_without_ddp = fuse_model.module
 
 
-
-    param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay, no_weight_decay_list=model_without_ddp.no_weight_decay(), layer_decay=args.layer_decay)
+    if args.contrastive_resume:
+        param_groups = lrd.contrastive_param_groups_lrd(model_without_ddp, args.weight_decay, no_weight_decay_list=model_without_ddp.no_weight_decay(), layer_decay=args.layer_decay)
+    else:
+        param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay, no_weight_decay_list=model_without_ddp.no_weight_decay(), layer_decay=args.layer_decay)
+ 
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
     loss_scaler = NativeScaler(loss_scale=args.loss_scale)
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
-    if args.loss_fn == "contrastive":
-        criterion = ContrastiveLoss()
-    elif args.loss_fn == "infonce":
-        criterion = InfoNCE()
-    elif args.loss_fn == "clip_loss":
-        criterion = CLIPLoss(args)
+    if mixup_fn is not None:
+        # smoothing is handled with mixup label transform
+        criterion = SoftTargetCrossEntropy()
+    elif args.smoothing > 0.0:
+        criterion = LabelSmoothingCrossEntropy(smoothing=args.smoothing)
+    else:
+        criterion = torch.nn.CrossEntropyLoss()
 
     print("criterion = %s" % str(criterion))
 
     
+    
     if args.eval:
-        test_stats = evaluate(args=args, data_loader=data_loader_val, model=contrast_model, criterion=criterion, device=device)
+        test_stats = evaluate(args, data_loader_val, fuse_model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images for superkingdom: {test_stats['acc1_0']:.1f}%")
         print(f"Accuracy of the network on the {len(dataset_val)} test images for phylum: {test_stats['acc1_1']:.1f}%")
         print(f"Accuracy of the network on the {len(dataset_val)} test images for genus: {test_stats['acc1_2']:.1f}%")
@@ -277,13 +310,13 @@ def main(args):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
-        train_stats = train_one_epoch(contrast_model, criterion, data_loader_train, optimizer, device, epoch, loss_scaler, args.clip_grad, log_writer=log_writer, args=args)
+        train_stats = train_one_epoch(fuse_model, criterion, data_loader_train, optimizer, device, epoch, loss_scaler, args.clip_grad, mixup_fn, log_writer=log_writer, args=args)
 
         if args.output_dir:
 
-            misc.save_model(args=args, model=contrast_model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch)
+            misc.save_model(args=args, model=fuse_model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler, epoch=epoch)
 
-        test_stats = evaluate(args=args, data_loader=data_loader_val, model=contrast_model, criterion=criterion, device=device)
+        test_stats = evaluate(args, data_loader_val, fuse_model, device)
 
         if log_writer is not None:
             for k in test_stats:

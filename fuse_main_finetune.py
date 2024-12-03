@@ -123,7 +123,7 @@ def get_args_parser():
     parser.add_argument('--vit_model', default='vit_base_patch4_5mer', type=str, metavar='MODEL', help='Name of model to train')
     parser.add_argument('--input_size', default=224, type=int, help='images input size')
     parser.add_argument('--cls_num', default=5, help="the class number used for vit head")  #['superkingdom', 'kingdom', 'phylum', 'family']
-    parser.add_argument('--vit_resume', default='', help='resume from vit checkpoint')
+    parser.add_argument('--vit_resume', default='./output/output_b_p4_5mer/checkpoint-540.pth', help='resume from vit checkpoint')
     parser.add_argument('--vit_embed_dim', default=768, type=int, help='Dimension of the vision transformer')
 
     # BERT Model paramerters
@@ -158,7 +158,12 @@ def get_args_parser():
 
     parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
     parser.add_argument('--loss_scale', action='store_true', help='Enable loss scaling')
-    
+    parser.add_argument('--vit2bert_proj',action='store_true', help='do not use layernorm all mlp head')
+    parser.add_argument('--no_norm_before_head',action='store_true', help='do not use layernorm all mlp head')
+
+    parser.add_argument('--contrastive_resume', default='', help='resume from fuse model checkpoint')
+
+
     return parser
 
 

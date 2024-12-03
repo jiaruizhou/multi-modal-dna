@@ -14,12 +14,13 @@ import sys
 from typing import Iterable, Optional
 import torch
 from timm.data import Mixup
-from util.metrics import accuracy, macro_average_precision, plot_roc, plot_pr_curve, micro_average_precision, weighted_macro_average_precision, weighted_micro_average_precision, new_macro_average_precision
+from util.metrics import accuracy, macro_average_precision, plot_roc, plot_pr_curve, micro_average_precision, weighted_macro_average_precision, weighted_micro_average_precision
 import util.misc as misc
 import util.lr_sched as lr_sched
 # from torchmetrics import Accuracy
 import os
-
+import numpy as np
+import torch.nn.functional as F
 def create_csv(csv_path):
     
     with open(csv_path, 'a+') as f:
@@ -78,10 +79,13 @@ def train_one_epoch(model: torch.nn.Module,
                     log_writer=None,
                     args=None):
     model.train(True)
-    if not args.train_bert:
-        unwrap_ddp(model).textmodel.eval()
-    if not args.train_vit:
-        unwrap_ddp(model).visualmodel.eval()
+    if not args.train_contrastive:
+        unwrap_ddp(model).encode.eval()
+    else:
+        if not args.train_bert:
+            unwrap_ddp(model).textmodel.eval()
+        if not args.train_vit:
+            unwrap_ddp(model).visualmodel.eval()
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
@@ -204,19 +208,27 @@ def evaluate(args, data_loader, model, device):
     # classes = [5, 44, 156]
     for i, rank in enumerate(rank_dicts.keys()):
         print("*********** For {} ***********".format(rank))
-        acc1, acc5 = accuracy(torch.stack(outputs[i]).cpu(), torch.stack(targets[i]).cpu(), topk=(1, 5))
-        macro_avep, aver, avef = macro_average_precision(torch.stack(outputs[i]).cpu(), torch.stack(targets[i]).cpu())
-        micro_avep = micro_average_precision(torch.stack(outputs[i]).cpu(), torch.stack(targets[i]).cpu())
-        weighted_macro = weighted_macro_average_precision(torch.stack(outputs[i]).cpu(), torch.stack(targets[i]).cpu())
-        weighted_micro = weighted_micro_average_precision(torch.stack(outputs[i]).cpu(), torch.stack(targets[i]).cpu())
+        y_pred = torch.stack(outputs[i]).cpu()
+        y_true = torch.stack(targets[i]).cpu()
+        acc1, acc5 = accuracy(y_pred, y_true, topk=(1, 5))
+
+        y_pred = F.softmax(y_pred.clone().detach().float(), dim=-1).numpy()
+        y_pred_max = np.argmax(y_pred, axis=-1)
+        
+        macro_avep, aver, avef = macro_average_precision(y_pred_max, y_true)
+        
+        micro_avep = micro_average_precision(y_pred_max, y_true)
+        weighted_macro = weighted_macro_average_precision(y_pred_max, y_true)
+        weighted_micro = weighted_micro_average_precision(y_pred_max, y_true)
+        
         # ACC = Accuracy(torch.stack(outputs[i]).cpu(), torch.stack(targets[i]).cpu())
         print(" RESULTS acc1:{} acc5:{} \nmacro_avep:{} micro_avep:{} weighted macro_avep:{} weighted micro_avep:{} \naver:{} avef:{}".format(acc1, acc5, macro_avep, micro_avep, weighted_macro, weighted_micro, aver, avef))
         # if args.eval:
         #     new_macro = new_macro_average_precision(torch.stack(outputs[i]).cpu(), torch.stack(targets[i]).cpu())
         #     print("average_precision_score  ", new_macro)
         if args.eval:
-            plot_roc(args, rank, torch.stack(targets[i]).cpu(), torch.stack(outputs[i]).cpu(), all_curves=True)
-            plot_pr_curve(args, rank, torch.stack(targets[i]).cpu(), torch.stack(outputs[i]).cpu())
+            # plot_roc(args, rank, torch.stack(targets[i]).cpu(), torch.stack(outputs[i]).cpu(), all_curves=True)
+            # plot_pr_curve(args, rank, torch.stack(targets[i]).cpu(), torch.stack(outputs[i]).cpu())
             log = [args.kmer, args.data, rank, acc1.item(), acc5.item(), macro_avep, micro_avep, weighted_macro, weighted_micro, aver, avef, metric_logger.__getattr__('loss{}'.format(i)).global_avg]
             write_log(args.output_dir, log)
 
@@ -227,56 +239,3 @@ def evaluate(args, data_loader, model, device):
         metric_logger.meters['acc5_{}'.format(i)].update(acc5.item())
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
-
-@torch.no_grad()
-def get_encoded(args, data_loader, model, device):
-    model.eval()
-    features = []
-    labels1 = []
-    labels2 = []
-    labels3 = []
-    metric_logger = misc.MetricLogger(delimiter="  ")
-    header = 'get_latent'
-    # switch to evaluation mode
-    model.eval()
-    # flat=torch.nn.Flatten(start_dim=0,end_dim=1)
-    for batch in metric_logger.log_every(data_loader, 40, header):
-        images = batch[0]
-        idx = batch[1]
-        images = images.to(device, non_blocking=True)
-        # compute output
-        with torch.amp.autocast('cuda', enabled=args.amp):
-            _, _, _, latent = model(images)
-            features.extend(latent.unsqueeze(1).cpu())
-            labels1.extend(idx[0])
-            labels2.extend(idx[1])
-            labels3.extend(idx[2])
-    features = torch.stack(features)
-    labels1 = torch.stack(labels1).unsqueeze(1)
-    labels2 = torch.stack(labels2).unsqueeze(1)
-    labels3 = torch.stack(labels3).unsqueeze(1)
-    labels = torch.cat([labels1, labels2, labels3], dim=1)
-    return features, labels
-
-    # for i, (outputs_n, targets_n) in enumerate(zip(output, target)):
-    #     acc1, acc5 = accuracy(outputs_n.cpu().float(), targets_n, topk=(1, 5))
-    #     avep, aver, avef = macro_average_precision(outputs_n.cpu().float(), targets_n)
-    #     metric_logger.meters['avep{}'.format(i)].update(avep, n=batch_size)
-    #     metric_logger.meters['aver{}'.format(i)].update(aver, n=batch_size)
-    #     metric_logger.meters['avef{}'.format(i)].update(avef, n=batch_size)
-    #     metric_logger.meters['acc1_{}'.format(i)].update(acc1.item(), n=batch_size)
-    #     metric_logger.meters['acc5_{}'.format(i)].update(acc5.item(), n=batch_size)
-
-
-# print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} \
-#     \nAveP {avep.global_avg:.3f}  AveR {aver.global_avg:.3f}  \
-#     AveF {avef.global_avg:.3f} \nloss {losses.global_avg:.3f}\n'.format(top1=metric_logger.__getattr__('acc1_{}'.format(i)),
-#                                                                         top5=metric_logger.__getattr__('acc5_{}'.format(i)),
-#                                                                         avep=metric_logger.__getattr__('avep{}'.format(i)),
-#                                                                         aver=metric_logger.__getattr__('aver{}'.format(i)),
-#                                                                         avef=metric_logger.__getattr__('avef{}'.format(i)),
-#                                                                         losses=metric_logger.__getattr__('loss{}'.format(i))))
-
-# write_log(args,[args.kmer,args.data,rank,metric_logger.__getattr__('acc1_{}'.format(i)).global_avg,\
-# metric_logger.__getattr__('acc5_{}'.format(i)).global_avg,metric_logger.__getattr__('avep{}'.format(i)).global_avg,\
-#     metric_logger.__getattr__('aver{}'.format(i)).global_avg,metric_logger.__getattr__('avef{}'.format(i)).global_avg,metric_logger.__getattr__('loss{}'.format(i)).global_avg])
