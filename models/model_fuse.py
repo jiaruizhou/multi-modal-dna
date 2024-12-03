@@ -64,6 +64,7 @@ class fuse_dna_model(nn.Module):
         self.pooling_method = args.pooling_method
         self.global_pooling_vit_bert = args.global_pooling_vit_bert
         self.hidden_dim = args.vl_hidden_dim
+        self.vit2bert_proj = args.vit2bert_proj
 
         self.textmodel = build_bert_model(args)
         self.visualmodel = build_vit_model(args)
@@ -88,6 +89,8 @@ class fuse_dna_model(nn.Module):
 
             self.mlp = Classification_Head(args)
         else:
+            if self.vit2bert_proj:
+                self.visual2text_proj = torch.nn.Linear(args.vit_embed_dim, args.bert_embed_dim)
             self.mlp = Classification_Head(args)
 
     def forward(self, x):
@@ -97,7 +100,7 @@ class fuse_dna_model(nn.Module):
         # visual backbone
         visual_src = self.visualmodel(visual_data) # [B, 65, 768]
         text_outputs = self.textmodel(text_data[0].squeeze(1), token_type_ids=text_data[1].squeeze(1)) # text_data.shape [B, 1, 502])
-        text_src, pooler_text_src = text_outputs.last_hidden_state, text_outputs.pooler_output
+        text_src = text_outputs.last_hidden_state 
 
         if not self.global_pooling_vit_bert:
                         
@@ -118,11 +121,13 @@ class fuse_dna_model(nn.Module):
             if self.pooling_method == "cls_output":
                 text_feature = text_src[:, 0]
             elif self.pooling_method == "pooler_output":
-                text_feature = pooler_text_src # [B, vl_dim]
+                text_feature = text_outputs.pooler_output # [B, vl_dim]
             elif self.pooling_method == "average_pooling":
                 text_feature = text_src[:,1:].mean(dim=1) # TODO handle padding
             else:
                 raise NotImplementedError(f"Unsupported pooling method: {self.pooling_method}")
+            if self.vit2bert_proj:
+                visual_feature = self.visual2text_proj(visual_feature)
             vl_feature = torch.cat([visual_feature,text_feature],dim=-1)
             outputs = self.mlp(vl_feature)
         return outputs
@@ -140,22 +145,25 @@ class fuse_dna_model(nn.Module):
 class Classification_Head(nn.Module):
     def __init__(self,args):
         super(Classification_Head,self).__init__()
-        
+        self.no_norm_before_head = args.no_norm_before_head
         self.global_pooling_vit_bert =  args.global_pooling_vit_bert
-        if not self.global_pooling_vit_bert:
-            
-            self.head = torch.nn.Linear(args.vl_hidden_dim, 5)
-            self.head2 = torch.nn.Linear(self.head.in_features + self.head.out_features, 44)
-            self.head3 = torch.nn.Linear(self.head2.in_features + self.head2.out_features, 156)
-        else:
-            self.head = torch.nn.Linear(args.bert_embed_dim + args.vit_embed_dim, 5)
-            self.head2 = torch.nn.Linear(self.head.in_features + self.head.out_features, 44)
-            self.head3 = torch.nn.Linear(self.head2.in_features + self.head2.out_features, 156)
+        self.vit2bert_proj = args.vit2bert_proj
 
-        
-        self.fc_norm = nn.LayerNorm(self.head.in_features)
-        self.fc_norm2 = nn.LayerNorm(self.head2.in_features)
-        self.fc_norm3 = nn.LayerNorm(self.head3.in_features)
+        if self.vit2bert_proj:
+            vl_dim = 2 * args.bert_embed_dim
+        elif not self.global_pooling_vit_bert:
+            vl_dim = args.vl_hidden_dim
+        elif self.global_pooling_vit_bert and not self.vit2bert_proj:
+            vl_dim = args.bert_embed_dim + args.vit_embed_dim
+
+        self.head = torch.nn.Linear(vl_dim, 5)
+        self.head2 = torch.nn.Linear(self.head.in_features + self.head.out_features, 44)
+        self.head3 = torch.nn.Linear(self.head2.in_features + self.head2.out_features, 156)
+
+        if not self.no_norm_before_head:
+            self.fc_norm = nn.LayerNorm(self.head.in_features)
+            self.fc_norm2 = nn.LayerNorm(self.head2.in_features)
+            self.fc_norm3 = nn.LayerNorm(self.head3.in_features)
 
         trunc_normal_(self.head.weight, std=2e-5)
         if args.all_head_trunc:
@@ -164,14 +172,19 @@ class Classification_Head(nn.Module):
     
     def forward(self,src):
 
-        x1 = src
-        out1 = self.fc_norm(x1)  # 
+        out1 = x1 = src
+        if not self.no_norm_before_head:
+            out1 = self.fc_norm(x1)  # 
         outcome1 = self.head(out1)  # ([Batch, 5])
-        x2 = torch.cat([x1, outcome1], dim=-1)  # 
-        out2 = self.fc_norm2(x2)
+
+        out2 = x2 = torch.cat([x1, outcome1], dim=-1)  # 
+        if not self.no_norm_before_head:
+            out2 = self.fc_norm2(x2)
         outcome2 = self.head2(out2)  # ([Batch, 44])
-        x3 = torch.cat([x2, outcome2], dim=-1)  # 
-        out3 = self.fc_norm3(x3)
+
+        out3 = x3 = torch.cat([x2, outcome2], dim=-1)  # 
+        if not self.no_norm_before_head:
+            out3 = self.fc_norm3(x3)
         outcome3 = self.head3(out3)  # ([Batch, 156])
 
         return (outcome1, outcome2, outcome3)
@@ -187,7 +200,8 @@ def build_vl_transformer(args):
     )
 
 def build_bert_model(args):
-    return BertModel.from_pretrained(args.bert_resume)
+    bert = BertModel.from_pretrained(args.bert_resume,add_pooling_layer=(args.pooling_method=="pooler_output"))
+    return bert
 
 
 def build_vit_model(args):
