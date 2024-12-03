@@ -179,52 +179,59 @@ import torch.nn.functional as F
 
 
 def retreival(args, qvecs, dbvecs, q_label, db_label, topk):
-    batch_size = 200
-    qvecs = F.normalize(qvecs, dim=-1).squeeze(1)
-    dbvecs = F.normalize(dbvecs, dim=-1).squeeze(1)
-    start_time = time.time()
-    batch_size = min(batch_size, qvecs.size(0))
-    if qvecs.size(0) % batch_size == 0:
-        num = qvecs.size(0) // batch_size
+    if not os.path.exists(os.path.join(args.output_dir,f'results_{args.name}.pt')):
+
+        batch_size = 200
+        qvecs = F.normalize(qvecs, dim=-1)
+        dbvecs = F.normalize(dbvecs, dim=-1)
+        start_time = time.time()
+        batch_size = min(batch_size, qvecs.size(0))
+        if qvecs.size(0) % batch_size == 0:
+            num = qvecs.size(0) // batch_size
+        else:
+            num = qvecs.size(0) // batch_size + 1
+        print('>> Total iteration:{}'.format(num))
+
+        results=[[],[],[]]
+        with torch.no_grad():
+            for i in tqdm(range(num),leave=False):
+                start = i * batch_size
+                end = min(start + batch_size, qvecs.size(0))
+                query = qvecs[start:end]
+                score = torch.einsum("bd,kd->bk", query, dbvecs)
+                _, topk_indice = torch.topk(score, topk, dim=-1)
+
+                results[0].extend(db_label[rank_dict['supk']][topk_indice])
+                results[1].extend(db_label[rank_dict['phyl']][topk_indice])
+                results[2].extend(db_label[rank_dict['genus']][topk_indice])
+
+                if (i + 1) % 4000 == 0 or (i + 1) == qvecs.size(0):
+                    print('\r>>>> {}/{} done...'.format(i + 1, num), end='')
+
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+        print('retrieval time {}'.format(total_time_str))
+        results = torch.tensor(np.array(results))
+        # results = torch.load("/aiarena/group/mmirgroup/zhoujr/ai4/multi_modal_dna/contrastive_output/train_vit_freeze_bert_lr1e-4/non_similar/results.pt")
+        torch.save(results, os.path.join(args.output_dir,f'results_{args.name}.pt'))
     else:
-        num = qvecs.size(0) // batch_size + 1
-    print('>> Total iteration:{}'.format(num))
+        results = torch.load(os.path.join(args.output_dir,f'results_{args.name}.pt'))
 
-    total_acc1_1 = total_acc5_1 = total_acc1_2 = total_acc5_2 = total_acc1_3 = total_acc5_3 = total_acc10 = 0.0
-
-    with torch.no_grad():
-        for i in range(num):
-            start = i * batch_size
-            end = min(start + batch_size, qvecs.size(0))
-            query = qvecs[start:end]
-            score = torch.einsum("bd,kd->bk", query, dbvecs)
-            _, topk_indice = torch.topk(score, topk, dim=-1)
-            acc1_1, acc5_1 = retreival_acc(db_label[rank_dict['supk']][topk_indice], q_label[rank_dict['supk']][start:end], tk=(1, 5))
-            total_acc1_1 += acc1_1
-            total_acc5_1 += acc5_1
-            acc1_2, acc5_2 = retreival_acc(db_label[rank_dict['phyl']][topk_indice], q_label[rank_dict['phyl']][start:end], tk=(1, 5))
-            total_acc1_2 += acc1_2
-            total_acc5_2 += acc5_2
-            acc1_3, acc5_3 = retreival_acc(db_label[rank_dict['genus']][topk_indice], q_label[rank_dict['genus']][start:end], tk=(1, 5))
-            total_acc1_3 += acc1_3
-            total_acc5_3 += acc5_3
-            if (i + 1) % 4000 == 0 or (i + 1) == qvecs.size(0):
-                print('\r>>>> {}/{} done...'.format(i + 1, num), end='')
-        # pdb.set_trace()
-    print("Acc@1 {} Acc@5 {} on {}".format(total_acc1_1 / num, total_acc5_1 / num, "supk"))
-    write_log(args, [args.kmer, args.data, "supk", total_acc1_1.item() / num, total_acc5_1.item() / num])
-
-    print("Acc@1 {} Acc@5 {} on {}".format(total_acc1_2 / num, total_acc5_2 / num, "phyl"))
-    write_log(args, [args.kmer, args.data, "phyl", total_acc1_2.item() / num, total_acc5_2.item() / num])
-    print("Acc@1 {} Acc@5 {} on {}".format(total_acc1_3 / num, total_acc5_3 / num, "genus"))
-    write_log(args, [args.kmer, args.data, "genus", total_acc1_3.item() / num, total_acc5_3.item() / num])
-
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('retrieval time {}'.format(total_time_str))
-    return total_acc1_1 / num, total_acc5_1 / num, total_acc1_2 / num, total_acc5_2 / num,\
-        total_acc1_3 / num, total_acc5_3 / num
-
+    # result for rank k
+    topk_list=(1, 5, 10, 25)
+    for tax_rank in list(rank_dict.keys()):
+        acc = retreival_acc(results[rank_dict[tax_rank]], q_label[rank_dict[tax_rank]], tk=topk_list)
+        print(f"ACC @ {topk_list} on {tax_rank}: {acc}")
+        avep, aver, avef = [],[],[]
+        results_rk = get_result_rank(results[rank_dict[tax_rank]], topk_list=topk_list)
+        for i, topk in enumerate(topk_list):
+            avepk, averk, avefk = macro_average_precision(results_rk[i], q_label[rank_dict[tax_rank]])
+            avep.append(avepk.item())
+            aver.append(averk.item())
+            avef.append(avefk.item())
+        print(f"avep aver avef @ {topk} on {tax_rank}: {avep} {aver} {avef}")
+        log = [args.kmer, args.name, args.data, tax_rank, topk_list, acc, avep, aver, avef]
+        write_log(args, log)
 
 def retreival_acc(output, target, tk=(1, )):
     """Computes the accuracy over the k top predictions for the specified values of k"""

@@ -4,6 +4,22 @@ Hacked together by / Copyright 2020 Ross Wightman
 """
 
 
+import numpy as np
+import torch.nn.functional as F
+from sklearn.preprocessing import label_binarize
+from collections import namedtuple
+
+from util.custom_datasets import new_supk_dict, new_phyl_dict, new_genus_dict
+
+from sklearn.metrics import roc_curve, auc, average_precision_score, precision_recall_curve
+
+from sklearn.metrics import confusion_matrix, precision_score
+
+import matplotlib.pyplot as plt
+from sklearn.metrics import precision_recall_curve  #, auc
+from sklearn.preprocessing import label_binarize
+from scipy.stats import mode
+
 class AverageMeter:
     """Computes and stores the average and current value"""
 
@@ -24,7 +40,8 @@ class AverageMeter:
 
 
 def accuracy(output, target, topk=(1, )):
-    output = F.softmax(output.clone().detach().float(), dim=1)  # F.softmax(torch.tensor(output).float(), dim=1)
+    # output = F.softmax(output.clone().detach().float(), dim=1)  # F.softmax(torch.tensor(output).float(), dim=1)
+    
     """Computes the accuracy over the k top predictions for the specified values of k"""
     maxk = min(max(topk), output.shape[1])
     batch_size = target.size(0)
@@ -33,20 +50,17 @@ def accuracy(output, target, topk=(1, )):
     correct = pred.eq(target.reshape(1, -1).expand_as(pred))
     return [correct[:min(k, maxk)].reshape(-1).float().sum(0) * 100. / batch_size for k in topk]
 
-
-from sklearn.metrics import roc_curve, auc, average_precision_score, precision_recall_curve
-import torch
-
-from sklearn.metrics import confusion_matrix, precision_score
+def get_result_rank(results, topk_list):
+    topk_res = []
+    for topk in topk_list:
+        a = mode(np.array(results[:,:topk]).transpose())[0]
+        topk_res.append(a)
+    return topk_res
 
 
 def macro_average_precision(y_pred, y_true):
     # 获取所有类别
-    y_pred = F.softmax(y_pred.clone().detach().float(), dim=1).numpy()  #F.softmax(torch.tensor(y_pred).float(), dim=1).numpy()
-    # preds = F.softmax(preds.float(), dim=1).numpy()
-    y_pred = np.argmax(y_pred, axis=-1)
-    classes = set(list(y_true.cpu().numpy()))  #.union(set(y_pred.numpy()))
-    # classes=[i for i in range(classes)]
+    classes = set(list(y_true.cpu().numpy())) 
     # 初始化宏平均精度
     macro_avg_precision = 0.0
     macro_avg_recall = 0.0
@@ -57,11 +71,12 @@ def macro_average_precision(y_pred, y_true):
         y_pred_cls = [1 if label == cls else 0 for label in y_pred]
 
         # 计算混淆矩阵
-        if confusion_matrix(y_true_cls, y_pred_cls).ravel().shape[0] == 1:
+        out = confusion_matrix(y_true_cls, y_pred_cls).ravel()
+        if out.shape[0] == 1:
             fp = tn = fn = 0
             tp = len(y_true)
         else:
-            tn, fp, fn, tp = confusion_matrix(y_true_cls, y_pred_cls).ravel()
+            tn, fp, fn, tp = out
 
         # 计算精度
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
@@ -80,27 +95,19 @@ def macro_average_precision(y_pred, y_true):
     return macro_avg_precision * 100.0, macro_avg_recall * 100, macro_avg_f1 * 100
 
 
-def new_macro_average_precision(y_pred, y_true):
-    # 获取所有类别
-    y_pred = F.softmax(y_pred.clone().detach().float(), dim=1).numpy()  #F.softmax(torch.tensor(y_pred).float(), dim=1).numpy()
-    # preds = F.softmax(preds.float(), dim=1).numpy()
-    # y_pred = np.argmax(y_pred, axis=-1)
-
-    classes = set(list(y_true.cpu().numpy()))  #.union(set(y_pred.numpy()))
-    y_true_ohe = torch.nn.functional.one_hot(y_true, num_classes=int(y_pred.shape[1]))
-    macro_avg2 = precision_score(y_true, np.argmax(y_pred, axis=-1), average='macro')
-    print("precision_score 2  ", macro_avg2)
-    macro_avg_precision = average_precision_score(y_true_ohe, y_pred, average="macro")
-    return macro_avg_precision * 100.0  #, macro_avg_recall * 100, macro_avg_f1 * 100
+# def new_macro_average_precision(y_pred, y_true):
+#     # 获取所有类别
+#     classes = set(list(y_true.cpu().numpy()))  #.union(set(y_pred.numpy()))
+#     y_true_ohe = torch.nn.functional.one_hot(y_true, num_classes=int(y_pred.shape[1]))
+#     macro_avg2 = precision_score(y_true, np.argmax(y_pred, axis=-1), average='macro')
+#     print("precision_score 2  ", macro_avg2)
+#     macro_avg_precision = average_precision_score(y_true_ohe, y_pred, average="macro")
+#     return macro_avg_precision * 100.0  #, macro_avg_recall * 100, macro_avg_f1 * 100
 
 
 def weighted_macro_average_precision(y_pred, y_true):
     # 获取所有类别
-    y_pred = F.softmax(y_pred.clone().detach().float(), dim=1).numpy()  #F.softmax(torch.tensor(y_pred).float(), dim=1).numpy()
-    # preds = F.softmax(preds.float(), dim=1).numpy()
-    y_pred = np.argmax(y_pred, axis=-1)
-    classes = set(list(y_true.cpu().numpy()))  #.union(set(y_pred.numpy()))
-    # classes=[i for i in range(classes)]
+    classes = set(list(y_true.cpu().numpy()))  
     # 初始化宏平均精度
     weighted_macro_avg_precision = 0.0
     # 计算每个类别的精度并累加
@@ -126,11 +133,8 @@ def weighted_macro_average_precision(y_pred, y_true):
 
 def micro_average_precision(y_pred, y_true):
     # 获取所有类别
-    y_pred = F.softmax(y_pred.clone().detach().float(), dim=1).numpy()  #F.softmax(torch.tensor(y_pred).float(), dim=1).numpy()
-    # preds = F.softmax(preds.float(), dim=1).numpy()
-    y_pred = np.argmax(y_pred, axis=-1)
-    classes = set(list(y_true.cpu().numpy()))  #.union(set(y_pred.numpy()))
-    # classes=[i for i in range(classes)]
+    
+    classes = set(list(y_true.cpu().numpy()))
     # 初始化宏平均精度
     micro_avg_precision = 0.0
     ttp = 0.0
@@ -159,11 +163,8 @@ def micro_average_precision(y_pred, y_true):
 
 def weighted_micro_average_precision(y_pred, y_true):
     # 获取所有类别
-    y_pred = F.softmax(y_pred.clone().detach().float(), dim=1).numpy()  #F.softmax(torch.tensor(y_pred).float(), dim=1).numpy()
-    # preds = F.softmax(preds.float(), dim=1).numpy()
-    y_pred = np.argmax(y_pred, axis=-1)
-    classes = set(list(y_true.cpu().numpy()))  #.union(set(y_pred.numpy()))
-    # classes=[i for i in range(classes)]
+    classes = set(list(y_true.cpu().numpy()))  
+    
     # 初始化宏平均精度
     weighted_micro_avg_precision = 0.0
     ttp = 0.0
@@ -190,14 +191,6 @@ def weighted_micro_average_precision(y_pred, y_true):
     return weighted_micro_avg_precision * 100.0
 
 
-import numpy as np
-
-from sklearn.preprocessing import label_binarize
-from collections import namedtuple
-
-import torch.nn.functional as F
-
-from util.custom_datasets import new_supk_dict, new_phyl_dict, new_genus_dict
 
 
 def compute_roc(args, preds, trues):
@@ -252,6 +245,7 @@ def compute_roc(args, preds, trues):
 
 def plot_roc(args, rank, trues, preds, all_curves=True):
     preds = F.softmax(preds.float(), dim=1)
+    
     fpr, tpr, roc_auc = compute_roc(args, preds, trues)
     # classes = set(list(trues.cpu().numpy()))  # preds.size(1)
     all_class = set(list(trues.cpu().numpy()))
@@ -290,10 +284,6 @@ def plot_roc(args, rank, trues, preds, all_curves=True):
     plt.close()
     return roc_auc
 
-
-import matplotlib.pyplot as plt
-from sklearn.metrics import precision_recall_curve  #, auc
-from sklearn.preprocessing import label_binarize
 
 
 def compute_pr(args, trues, preds):
