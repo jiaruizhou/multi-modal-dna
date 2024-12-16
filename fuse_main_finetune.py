@@ -158,7 +158,10 @@ def get_args_parser():
 
     parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
     parser.add_argument('--loss_scale', action='store_true', help='Enable loss scaling')
-    parser.add_argument('--vit2bert_proj',action='store_true', help='do not use layernorm all mlp head')
+    parser.add_argument('--vit2bert_proj',action='store_true', help='use a  linear projection from vit to bert feature')
+    parser.add_argument('--train_contrastive',action='store_true')
+
+    
     parser.add_argument('--no_norm_before_head',action='store_true', help='do not use layernorm all mlp head')
 
     parser.add_argument('--contrastive_resume', default='', help='resume from fuse model checkpoint')
@@ -278,7 +281,7 @@ def main(args):
 
 
 
-    param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay, no_weight_decay_list=model_without_ddp.no_weight_decay(), layer_decay=args.layer_decay)
+    param_groups = lrd.fuse_param_groups_lrd(model_without_ddp, args.weight_decay, no_weight_decay_list=model_without_ddp.no_weight_decay(), layer_decay=args.layer_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
     loss_scaler = NativeScaler(loss_scale=args.loss_scale)
 

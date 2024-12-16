@@ -313,7 +313,9 @@ def load_vit_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
 
     # manually initialize fc layer
     # trunc_normal_(model_without_ddp.head.weight, std=2e-5)
-    
+
+    # print(msg)
+
 def load_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
     if args.resume:
         if args.resume.startswith('https'):
@@ -329,6 +331,18 @@ def load_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
                 loss_scaler.load_state_dict(checkpoint['scaler'])
             print("With optim & sched!")
 
+def load_retrieval_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
+    checkpoint = torch.load(args.retrieval_resume, map_location='cpu')
+
+    print("Load pre-trained retrieval_resume model checkpoint from: %s" % args.retrieval_resume)
+    checkpoint_model = checkpoint['model']
+    # state_dict = model_without_ddp.state_dict()
+    # for k in ['head.weight', 'head.bias']:
+    #     if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+    #         print(f"Removing key {k} from pretrained checkpoint")
+    #         del checkpoint_model[k]
+    msg = model_without_ddp.load_state_dict(checkpoint_model, strict=False)
+    # print(msg)
 
 def all_reduce_mean(x):
     world_size = get_world_size()

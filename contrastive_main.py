@@ -34,11 +34,12 @@ import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 from models.model_contrastive import contrastive_dna_model
+from models.model_fuse import build_bert_model, build_vit_model
 
 from contrastive_train import train_one_epoch, evaluate
 
 from util.custom_datasets import Visual_Text_Dataset
-from torch.utils.data import random_split
+from torch.utils.data import random_split, ConcatDataset
 
 import os
 
@@ -116,8 +117,8 @@ def get_args_parser():
     parser.add_argument('--bert_resume', default='./bertax_pytorch', help='resume from bert checkpoint')
     parser.add_argument('--config_path', default='./bertax_pytorch/config.json', help='resume from bert checkpoint')
     parser.add_argument('--bert_embed_dim', default=250, type=int, help='Dimension of the vision transformer')
-     # for vl model
-    parser.add_argument('--model', default='fuse', type=str, metavar='MODEL', help='Name of model to train')
+    # for vl model
+    parser.add_argument('--model', default='train_vit_freeze_bert', type=str, metavar='MODEL', help='Name of model to train')
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT', help='Drop path rate (default: 0.1)')
     parser.add_argument('--resume', default='', help='resume from fuse model checkpoint')
 
@@ -127,7 +128,6 @@ def get_args_parser():
     parser.add_argument('--global_pooling_vit_bert', action='store_true', help='Use global pooled features of ViT and BERT')
     parser.add_argument('--global_pool_vit', action='store_true', help='Use global pooled features of ViT')
     
-
     parser.add_argument('--single_gpu', action='store_true', help='Use single GPU to train')
     parser.add_argument('--all_head_trunc', action='store_true', help='Use trunc norm for all mlp head')
 
@@ -139,9 +139,11 @@ def get_args_parser():
     parser.add_argument('--loss_fn',default="clip_loss", choices=["contrastive","infonce","clip_loss"], help="The contrastive loss.")
     parser.add_argument('--cross_process_negatives',action='store_true', help="Gather all negatives from other gpus")
     parser.add_argument('--use_logit_scale',action='store_true', help="use learnerable temperature for clip loss")
+    parser.add_argument('--name', default='fuse', type=str, metavar='MODEL', help='Name of model to train')
+    parser.add_argument('--label_rank', default=1, type=int, choices=[0,1,2,12], help='The labels used for contrastive learning, 0 for supk, 1 for phyl, 2 for genus')
+
+    parser.add_argument('--mix_train_test', action='store_true', help='Mix training set and test set')
     return parser
-
-
 
 def main(args):
     args.data_path = os.path.join(args.data_path, args.data + "/")
@@ -167,6 +169,7 @@ def main(args):
     np.random.seed(seed)
 
     if not args.eval:
+
         dataset = Visual_Text_Dataset(args, files=args.data_path, kmer=args.kmer, phase="train")
 
         train_size = int(0.95 * len(dataset))
@@ -176,13 +179,22 @@ def main(args):
         dataset_train, _ = random_split(dataset, [train_size, val_size])
         # todo change the datasets
         dataset_val = Visual_Text_Dataset(args, files=args.data_path, kmer=args.kmer, phase="test")
-
+        if args.mix_train_test:
+            print("**!!!!!!!!!!**")
+            dataset_train = ConcatDataset([dataset_train, dataset_val])
+        print(f"dataset_train {len(dataset_train)}")
     if args.eval:
         dataset_val = Visual_Text_Dataset(args, files=args.data_path, kmer=args.kmer, phase="test")
     
-    contrast_model = contrastive_dna_model(args)
+    if args.name == "fuse":
+        contrast_model = contrastive_dna_model(args)
+    elif args.name == 'bert':
+        contrast_model = build_bert_model(args)
+    elif args.name == 'vit':
+        contrast_model = build_vit_model(args)
+    else:
+        raise ValueError(f"Unsupported model type: {args.name}")
     contrast_model.to(device)
-
     # fix the seed for reproducibility
     seed = args.seed + misc.get_rank()
     random.seed(seed)
@@ -246,14 +258,20 @@ def main(args):
         contrast_model = torch.nn.parallel.DistributedDataParallel(contrast_model, device_ids=[args.gpu])
         model_without_ddp = contrast_model.module
 
-
-
-    param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay, no_weight_decay_list=model_without_ddp.no_weight_decay(), layer_decay=args.layer_decay)
+    if args.name == "bert":
+        param_groups = lrd.bert_param_groups_lrd(model_without_ddp, args.weight_decay, layer_decay=args.layer_decay)
+    else:
+        param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay, no_weight_decay_list=model_without_ddp.no_weight_decay(), layer_decay=args.layer_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
     loss_scaler = NativeScaler(loss_scale=args.loss_scale)
 
-    misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
-
+    if args.name == "fuse":
+        misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+    elif args.name == 'bert':
+       pass
+    elif args.name == 'vit':
+       pass
+    
     if args.loss_fn == "contrastive":
         criterion = ContrastiveLoss()
     elif args.loss_fn == "infonce":

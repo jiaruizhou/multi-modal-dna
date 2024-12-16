@@ -87,7 +87,7 @@ def get_args_parser():
 
     parser.add_argument('--model', default='fuse', type=str, metavar='MODEL', help='Name of model to train')
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT', help='Drop path rate (default: 0.1)')
-    parser.add_argument('--contrastive_resume', default='', help='resume from fuse model checkpoint')
+    parser.add_argument('--retrieval_resume', default='', help='resume from fuse model checkpoint')
 
     parser.add_argument('--single_gpu', action='store_true', help='Use single GPU to train')
     parser.add_argument('--all_head_trunc', action='store_true', help='Use trunc norm for all mlp head')
@@ -96,7 +96,9 @@ def get_args_parser():
     parser.add_argument('--topk', default=10, type=int)
     parser.add_argument('--name', default='fuse',choices=['vit','bert','fuse','mae'], type=str, help='Name of model to train')
     parser.add_argument('--get_encode', action='store_true')
+    parser.add_argument('--save_tmp_files', action='store_true')
     parser.add_argument('--mae_model_name', default="mae_vit_base_patch4_5mer")
+    parser.add_argument('--test_ckp', default=10, type=int)
     return parser
 
 def get_feature_vec(args):
@@ -115,6 +117,9 @@ def get_feature_vec(args):
 
     dataset_db = Visual_Text_Dataset(args, files=args.data_path, kmer=args.kmer, phase="train")
     dataset_q = Visual_Text_Dataset(args, files=args.data_path, kmer=args.kmer, phase="test")
+
+    assert len(dataset_db) % misc.get_world_size() == 0
+    assert len(dataset_q) % misc.get_world_size() == 0
 
     if True:  # args.distributed:
         num_tasks = misc.get_world_size()
@@ -153,13 +158,8 @@ def get_feature_vec(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
         model_without_ddp = model.module
 
-    if args.name == 'fuse':
-        misc.load_contrastive_model(args=args, model_without_ddp=model_without_ddp)
-    elif args.name == 'bert':
-        pass
-    elif args.name == 'vit':
-        pass
-        # misc.load_vit_model(args=args, model_without_ddp=model_without_ddp)
+    if args.name == 'fuse' or args.name == 'bert' or args.name == 'vit':
+        misc.load_retrieval_model(args=args, model_without_ddp=model_without_ddp)
     elif args.name == 'mae':
         pass
 
@@ -176,10 +176,10 @@ def get_feature_vec(args):
         elif misc.is_main_process():
             print(f"[RANK] {misc.get_rank()}: The shape of {args.name} encoded feature DB {db_features.shape} Q:{q_features.shape}")
 
-        misc.save_on_master(db_features,os.path.join(args.output_dir,f"dbvecs1_{args.name}.pt"))
-        misc.save_on_master(db_labels,os.path.join(args.output_dir,f"dby1_{args.name}.pt"))
-        misc.save_on_master(q_features,os.path.join(args.output_dir,f"qvecs1_{args.name}.pt"))
-        misc.save_on_master(q_labels,os.path.join(args.output_dir,f"qy1_{args.name}.pt"))
+        misc.save_on_master(db_features,os.path.join(args.output_dir,f"dbvecs_{args.name}_ckp{args.test_ckp}.pt"))
+        misc.save_on_master(db_labels,os.path.join(args.output_dir,f"dby_{args.name}_ckp{args.test_ckp}.pt"))
+        misc.save_on_master(q_features,os.path.join(args.output_dir,f"qvecs_{args.name}_ckp{args.test_ckp}.pt"))
+        misc.save_on_master(q_labels,os.path.join(args.output_dir,f"qy_{args.name}_ckp{args.test_ckp}.pt"))
     return db_features, db_labels, q_features, q_labels
 
 
@@ -288,10 +288,12 @@ def get_vl_encoded(args, data_loader, model, device):
         labels_supk, labels_phyl, labels_genus = torch.stack(labels_supk), torch.stack(labels_phyl), torch.stack(labels_genus)
     return  (visual_features, text_features), (labels_supk, labels_phyl, labels_genus)
     
-def retreival(args, qvecs, dbvecs, q_label, db_label, topk):
-    if not os.path.exists(os.path.join(args.output_dir,f'results_{args.name}.pt')):
+def retreival(args, qvecs, dbvecs, q_label, db_label):
+    topk_list=(1, 5, 10, 25)
+    topk = max(topk_list)
+    if not os.path.exists(os.path.join(args.output_dir,f'results_{args.name}_ckp{args.test_ckp}.pt')):
 
-        batch_size = 200
+        batch_size = 600
         qvecs = F.normalize(qvecs, dim=-1)
         dbvecs = F.normalize(dbvecs, dim=-1)
         start_time = time.time()
@@ -315,32 +317,28 @@ def retreival(args, qvecs, dbvecs, q_label, db_label, topk):
                 results[1].extend(db_label[rank_dict['phyl']][topk_indice])
                 results[2].extend(db_label[rank_dict['genus']][topk_indice])
 
-                if (i + 1) % 4000 == 0 or (i + 1) == qvecs.size(0):
-                    print('\r>>>> {}/{} done...'.format(i + 1, num), end='')
-
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
         print('retrieval time {}'.format(total_time_str))
         results = torch.tensor(np.array(results))
-        # results = torch.load("/aiarena/group/mmirgroup/zhoujr/ai4/multi_modal_dna/contrastive_output/train_vit_freeze_bert_lr1e-4/non_similar/results.pt")
-        torch.save(results, os.path.join(args.output_dir,f'results_{args.name}.pt'))
+        torch.save(results, os.path.join(args.output_dir,f'results_{args.name}_ckp{args.test_ckp}.pt'))
     else:
-        results = torch.load(os.path.join(args.output_dir,f'results_{args.name}.pt'))
+        results = torch.load(os.path.join(args.output_dir,f'results_{args.name}_ckp{args.test_ckp}.pt'))
 
     # result for rank k
-    topk_list=(1, 5, 10, 25)
+    
     for tax_rank in list(rank_dict.keys()):
         acc = retreival_acc(results[rank_dict[tax_rank]], q_label[rank_dict[tax_rank]], tk=topk_list)
         print(f"ACC @ {topk_list} on {tax_rank}: {acc}")
         avep, aver, avef = [],[],[]
         results_rk = get_result_rank(results[rank_dict[tax_rank]], topk_list=topk_list)
-        for i, topk in enumerate(topk_list):
+        for i, topk_i in enumerate(topk_list):
             avepk, averk, avefk = macro_average_precision(results_rk[i], q_label[rank_dict[tax_rank]])
             avep.append(avepk.item())
             aver.append(averk.item())
             avef.append(avefk.item())
-        print(f"avep aver avef @ {topk} on {tax_rank}: {avep} {aver} {avef}")
-        log = [args.kmer, args.name, args.data, tax_rank, topk_list, acc, avep, aver, avef]
+        print(f"avep aver avef @ {topk_i} on {tax_rank}: {avep} {aver} {avef}")
+        log = [args.test_ckp, args.name, args.data, tax_rank, topk_list, acc, avep, aver, avef]
         write_log(args, log)
 
 def retreival_acc(output, target, tk=(1, )):
@@ -356,12 +354,12 @@ def write_log(args, log):
     if os.path.exists(os.path.join(args.output_dir,"retrieval.csv")) is False:
         with open(os.path.join(args.output_dir,"retrieval.csv"), 'a+') as f:
             csv_write = csv.writer(f)
-            csv_head = ["kmer", "model_name", "dataset", "tax_rank", "topk_list", "ACC", "AveP", "AveR", "AveF"]  # 
+            csv_head = ["checkpoint", "model_name", "dataset", "tax_rank", "topk_list", "ACC", "AveP", "AveR", "AveF"]  # 
             csv_write.writerow(csv_head)
-    else:
-        with open(os.path.join(args.output_dir,"retrieval.csv"), 'a+') as f:
-            csv_write = csv.writer(f)
-            csv_write.writerow(log)
+
+    with open(os.path.join(args.output_dir,"retrieval.csv"), 'a+') as f:
+        csv_write = csv.writer(f)
+        csv_write.writerow(log)
 
 rank_dict = {"supk": 0, "phyl": 1, "genus": 2}
 if __name__ == '__main__':
@@ -377,14 +375,14 @@ if __name__ == '__main__':
         db_features, db_labels, q_features, q_labels = get_feature_vec(args)
         exit(0)
     else:
-        db_features = torch.load(os.path.join(args.output_dir,f"dbvecs1_{args.name}.pt"))
-        db_labels = torch.load(os.path.join(args.output_dir,f"dby1_{args.name}.pt"))
-        q_features = torch.load(os.path.join(args.output_dir,f"qvecs1_{args.name}.pt"))
-        q_labels = torch.load(os.path.join(args.output_dir,f"qy1_{args.name}.pt"))
+        db_features = torch.load(os.path.join(args.output_dir,f"dbvecs_{args.name}_ckp{args.test_ckp}.pt"))
+        db_labels = torch.load(os.path.join(args.output_dir,f"dby_{args.name}_ckp{args.test_ckp}.pt"))
+        q_features = torch.load(os.path.join(args.output_dir,f"qvecs_{args.name}_ckp{args.test_ckp}.pt"))
+        q_labels = torch.load(os.path.join(args.output_dir,f"qy_{args.name}_ckp{args.test_ckp}.pt"))
     if args.name == 'fuse':
         qvecs, dbvecs = torch.cat([q_features[0],q_features[1]],dim=-1), torch.cat([db_features[0],db_features[1]],dim=-1)
     elif args.name == 'bert' or args.name == 'vit' or args.name == 'mae':
         qvecs, dbvecs = q_features, db_features
 
     print(f"Start retrieval on {args.data}")
-    retreival(args, qvecs, dbvecs, q_labels, db_labels, args.topk)
+    retreival(args, qvecs, dbvecs, q_labels, db_labels)

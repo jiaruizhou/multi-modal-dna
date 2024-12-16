@@ -5,13 +5,11 @@ import util.lr_sched as lr_sched
 import math
 import torch.distributed as dist
 
-
 def unwrap_ddp(model):
     if hasattr(model, "module"):
         return unwrap_ddp(model.module)
     else:
         return model
-
 
 def to_device(x, device, non_blocking=True):
     if isinstance(x, torch.Tensor):
@@ -25,7 +23,6 @@ def to_device(x, device, non_blocking=True):
     else:
         raise ValueError(f"Unsupported type: {type(x)}")
     return x
-
 
 class AllGather(torch.autograd.Function):
     """ 
@@ -50,7 +47,14 @@ class AllGather(torch.autograd.Function):
 
         return None, grad_list[rank] 
 
-
+def get_gather_data(features):
+    features = features.contiguous()
+    if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+        raise ValueError("cross_process_negatives requires torch.distributed to be initialized")
+    gathered_feature = [torch.zeros_like(features) for _ in range(torch.distributed.get_world_size())]
+    # torch.distributed.all_gather(gathered_feature, features)# AllGather.apply
+    AllGather.apply(gathered_feature, features)
+    return torch.cat(gathered_feature, dim=0)
 
 def train_one_epoch(model: torch.nn.Module,
                     criterion: torch.nn.Module,
@@ -63,10 +67,11 @@ def train_one_epoch(model: torch.nn.Module,
                     log_writer=None,
                     args=None):
     model.train(True)
-    if not args.train_bert:
-        unwrap_ddp(model).textmodel.eval()
-    if not args.train_vit:
-        unwrap_ddp(model).visualmodel.eval()
+    if args.name == "fuse":
+        if not args.train_bert:
+            unwrap_ddp(model).textmodel.eval()
+        if not args.train_vit:
+            unwrap_ddp(model).visualmodel.eval()
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
@@ -77,7 +82,7 @@ def train_one_epoch(model: torch.nn.Module,
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
 
-    for data_iter_step, (samples, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, (samples, labels) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
@@ -85,39 +90,66 @@ def train_one_epoch(model: torch.nn.Module,
         
             #  (fcgr,(token_id,token_ids))
         samples = to_device(samples, device, non_blocking=True)
-        
+        labels = to_device(labels, device, non_blocking=True)
 
+        torch.cuda.empty_cache()
         with torch.amp.autocast('cuda', enabled=args.amp):
-            visual_feature, text_feature = model(samples)
-
-        if args.cross_process_negatives:
-            visual_feature = visual_feature.contiguous()
-            text_feature = text_feature.contiguous()
-            bs = args.batch_size
-            if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
-                raise ValueError("cross_process_negatives requires torch.distributed to be initialized")
-            visual_features = [torch.zeros_like(visual_feature) for _ in range(torch.distributed.get_world_size())]
-            AllGather.apply(visual_features, visual_feature)
-            visual_feature = torch.cat(visual_features, dim=0)
-            text_features = [torch.zeros_like(text_feature) for _ in range(torch.distributed.get_world_size())]
-            AllGather.apply(text_features, text_feature)
-            text_feature = torch.cat(text_features, dim=0)
-
-        loss = criterion(visual_feature,text_feature)
-        visual_feature, text_feature = visual_feature.detach().cpu(), text_feature.detach().cpu()
-        visual_feature = visual_feature / visual_feature.norm(p=2, dim=-1, keepdim=True)
-        text_feature = text_feature / text_feature.norm(p=2, dim=-1, keepdim=True)
-        sim_matrix = torch.mm(visual_feature, text_feature.t())
+            if args.name == "fuse":
+                visual_feature, text_feature = model(samples)
+            elif args.name  == "vit":
+                feature = model(samples[0])
+            elif args.name == "bert":
+                feature = model(samples[1][0].squeeze(1), token_type_ids=samples[1][1].squeeze(1)).last_hidden_state[:, 0]
         
-        sorted_indices = torch.argsort(sim_matrix, dim=1, descending=True)
-        ranks = torch.zeros_like(sim_matrix, dtype=torch.long)
-        rank = ranks.scatter_(1, sorted_indices, torch.arange(sim_matrix.size(1)).expand_as(sim_matrix)).diag() + 1
-        assert rank.dim() == 1
-        avg_rank = rank.float().mean().item()
+        if args.cross_process_negatives:
+            if args.name == "fuse":
+                visual_feature = get_gather_data(visual_feature.contiguous())
+                text_feature = get_gather_data(text_feature.contiguous())
+            elif args.name  == "vit" or args.name == "bert":
+                feature = get_gather_data(feature.contiguous())
+            # labels_supk = get_gather_data(labels[0])
+            # labels_phyl = get_gather_data(labels[1])
+            # labels_genus = get_gather_data(labels[2])
+            if args.label_rank == 12:
+                labels_1 = get_gather_data(labels[1])
+                labels_2 = get_gather_data(labels[2])
+            else:
+                labels_ = get_gather_data(labels[args.label_rank])
+        if args.name == "fuse":
+            loss = criterion(visual_feature,text_feature)
+            visual_feature, text_feature = visual_feature.detach().cpu(), text_feature.detach().cpu()
+            visual_feature = visual_feature / visual_feature.norm(p=2, dim=-1, keepdim=True)
+            text_feature = text_feature / text_feature.norm(p=2, dim=-1, keepdim=True)
+            sim_matrix = torch.mm(visual_feature, text_feature.t())
+        elif args.name  == "vit" or args.name == "bert":
+            if args.loss_fn == "contrastive":
+                if args.label_rank == 12:
+                    loss = criterion(feature,feature,labels_1) + criterion(feature,feature,labels_2)
+                else:
+                    loss = criterion(feature,feature,labels_)
+            elif args.loss_fn == "infonce":
+                if args.label_rank == 12:
+                    loss = criterion(feature, labels_1) + criterion(feature, labels_2)
+                else:
+                    loss = criterion(feature, labels_)
+            elif args.loss_fn == "clip_loss":
+                if args.label_rank == 12:
+                    loss = criterion(feature,feature,labels_1) + criterion(feature,feature,labels_2)
+                else:
+                    loss = criterion(feature,feature,labels_)
+            feature = feature / feature.norm(p=2, dim=-1, keepdim=True)
+            sim_matrix = torch.mm(feature, feature.t())
+        
+        # sorted_indices = torch.argsort(sim_matrix, dim=1, descending=True)
+        # ranks = torch.zeros_like(sim_matrix, dtype=torch.long)
+        # rank = ranks.scatter_(1, sorted_indices, torch.arange(sim_matrix.size(1)).expand_as(sim_matrix)).diag() + 1
+        # assert rank.dim() == 1
+        # avg_rank = rank.float().mean().item()
 
         loss_value = loss.item()
         loss_value_reduce = misc.all_reduce_mean(loss_value)
         if not math.isfinite(loss_value_reduce):
+            del loss
             print("[Warning] Loss is {}, skipped.".format(loss_value))
             continue
         if not args.single_gpu:
@@ -146,7 +178,7 @@ def train_one_epoch(model: torch.nn.Module,
             global_step = epoch * len(data_loader) // accum_iter + data_iter_step // accum_iter
             log_writer.add_scalar('train/loss', loss_value_reduce, global_step)
             log_writer.add_scalar('train/lr', max_lr, global_step)
-            log_writer.add_scalar('train/rank', avg_rank, global_step)
+            # log_writer.add_scalar('train/rank', avg_rank, global_step)
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -160,31 +192,66 @@ def evaluate(args, data_loader, model, criterion, device):
     header = 'Test:'
     # switch to evaluation mode
     model.eval()
-    for batch in metric_logger.log_every(data_loader, 40, header):
-        samples = batch[0]
-        
+    for (samples, labels) in metric_logger.log_every(data_loader, 40, header):
         to_device(samples, device)
-        
+        to_device(labels, device)
         # compute output
+
         with torch.amp.autocast('cuda', enabled=args.amp):
-            visual_feature, text_feature = model(samples)
+            if args.name == "fuse":
+                visual_feature, text_feature = model(samples)
+            elif args.name  == "vit":
+                feature = model(samples[0])
+            elif args.name == "bert":
+                feature = model(samples[1][0].squeeze(1), token_type_ids=samples[1][1].squeeze(1)).last_hidden_state[:, 0]
+            # labels_supk = labels[0]
+            # labels_phyl = labels[1]
+            # labels_genus = labels[2]
+        if args.label_rank == 12:
+            labels_1 = labels[1]
+            labels_2 = labels[2]
+        else:
+            labels_ = labels[args.label_rank]
+        if args.name == "fuse":
             loss = criterion(visual_feature,text_feature)
+            visual_feature, text_feature = visual_feature.detach().cpu(), text_feature.detach().cpu()
+            visual_feature = visual_feature / visual_feature.norm(p=2, dim=-1, keepdim=True)
+            text_feature = text_feature / text_feature.norm(p=2, dim=-1, keepdim=True)
+            sim_matrix = torch.mm(visual_feature, text_feature.t())
+        elif args.name  == "vit" or args.name == "bert":
+            if args.loss_fn == "contrastive":
+                if args.label_rank == 12:
+                    loss = criterion(feature,feature,labels_1) + criterion(feature,feature,labels_2)
+                else:
+                    loss = criterion(feature,feature,labels_)
+            elif args.loss_fn == "infonce":
+                if args.label_rank == 12:
+                    loss = criterion(feature,labels_1) + criterion(feature,labels_2)
+                else:
+                    loss = criterion(feature,labels_)
+            elif args.loss_fn == "clip_loss":
+                if args.label_rank == 12:
+                    loss = criterion(feature,feature,labels_1) + criterion(feature,feature,labels_2)
+                else:
+                    loss = criterion(feature,feature,labels_)
+            feature = feature / feature.norm(p=2, dim=-1, keepdim=True)
+            sim_matrix = torch.mm(feature, feature.t())
         
-        visual_feature, text_feature = visual_feature.detach().cpu(), text_feature.detach().cpu()
+        # visual_feature, text_feature = visual_feature.detach().cpu(), text_feature.detach().cpu()
 
-        visual_feature = visual_feature / visual_feature.norm(p=2, dim=-1, keepdim=True)
-        visual_feature = text_feature / text_feature.norm(p=2, dim=-1, keepdim=True)
+        # visual_feature = visual_feature / visual_feature.norm(p=2, dim=-1, keepdim=True)
+        # visual_feature = text_feature / text_feature.norm(p=2, dim=-1, keepdim=True)
         
-        sim_matrix = visual_feature @ text_feature.t()
+        # sim_matrix = visual_feature @ text_feature.t()
 
-        sorted_indices = torch.argsort(sim_matrix, dim=1, descending=True)
-        ranks = torch.zeros_like(sim_matrix, dtype=torch.long)
-        rank = ranks.scatter_(1, sorted_indices, torch.arange(sim_matrix.size(1)).expand_as(sim_matrix)).diag() + 1
-        assert rank.dim() == 1
-        avg_rank = rank.float().mean().item()
+        # sorted_indices = torch.argsort(sim_matrix, dim=1, descending=True)
+        # ranks = torch.zeros_like(sim_matrix, dtype=torch.long)
+        # rank = ranks.scatter_(1, sorted_indices, torch.arange(sim_matrix.size(1)).expand_as(sim_matrix)).diag() + 1
+        # assert rank.dim() == 1
+        # avg_rank = rank.float().mean().item()
         
         metric_logger.meters['loss'].update(loss.item())
-        metric_logger.meters['avg_rank'].update(avg_rank)
+        # metric_logger.meters['avg_rank'].update(avg_rank)
         
 
     metric_logger.synchronize_between_processes()

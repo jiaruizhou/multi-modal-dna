@@ -79,13 +79,13 @@ def train_one_epoch(model: torch.nn.Module,
                     log_writer=None,
                     args=None):
     model.train(True)
-    if not args.train_contrastive:
-        unwrap_ddp(model).encode.eval()
-    else:
-        if not args.train_bert:
-            unwrap_ddp(model).textmodel.eval()
-        if not args.train_vit:
-            unwrap_ddp(model).visualmodel.eval()
+    # if not args.train_contrastive:
+    #     unwrap_ddp(model).encode.eval()
+    # else:
+    if not args.train_bert:
+        unwrap_ddp(model).textmodel.eval()
+    if not args.train_vit:
+        unwrap_ddp(model).visualmodel.eval()
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
