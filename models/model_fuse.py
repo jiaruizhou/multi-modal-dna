@@ -5,7 +5,7 @@ import copy
 
 import models.models_vit as models_vit
 import models.models_mae as models_mae
-from transformers import BertModel
+from transformers import BertModel, BertConfig
 from timm.layers import trunc_normal_
 import util.misc as misc
 
@@ -65,6 +65,7 @@ class fuse_dna_model(nn.Module):
         self.global_pooling_vit_bert = args.global_pooling_vit_bert
         self.hidden_dim = args.vl_hidden_dim
         self.vit2bert_proj = args.vit2bert_proj
+        self.gated_fuse = args.gated_fuse
 
         self.textmodel = build_bert_model(args)
         self.visualmodel = build_vit_model(args)
@@ -86,12 +87,30 @@ class fuse_dna_model(nn.Module):
             self.text_proj = nn.Linear(args.bert_embed_dim, args.vl_hidden_dim) # 250 -> 256
 
             self.vl_model = build_vl_transformer(args)
-
-            self.mlp = Classification_Head(args)
+            fused_feat_dim = args.vl_hidden_dim
         else:
-            if self.vit2bert_proj:
+            if self.gated_fuse:
+                if args.gate_num == 0:
+                    self.gate_fuse = Gate(args.vit_embed_dim, args.bert_embed_dim)
+                elif args.gate_num == 1:
+                    self.gate_fuse = Gate1(args.vit_embed_dim, args.bert_embed_dim)
+                elif args.gate_num == 2:
+                    self.gate_fuse = Gate2(args.vit_embed_dim, args.bert_embed_dim)
+                elif args.gate_num == 3:
+                    self.gate_fuse = Gate3(args.vit_embed_dim, args.bert_embed_dim)
+                elif args.gate_num == 4:
+                    self.gate_fuse = Gate4(args.vit_embed_dim, args.bert_embed_dim)
+                fused_feat_dim = args.vit_embed_dim
+            elif self.vit2bert_proj:
                 self.visual2text_proj = torch.nn.Linear(args.vit_embed_dim, args.bert_embed_dim)
-            self.mlp = Classification_Head(args)
+                fused_feat_dim = 2 * args.bert_embed_dim
+            else:
+                fused_feat_dim = args.bert_embed_dim + args.vit_embed_dim
+
+        self.mlp = Classification_Head(fused_feat_dim, 
+                                       all_head_trunc=args.all_head_trunc,
+                                       no_norm_before_head=args.no_norm_before_head)
+
 
     def forward(self, x):
         visual_data = x[0]
@@ -113,8 +132,7 @@ class fuse_dna_model(nn.Module):
             vl_src = vl_src + vl_pos
             
             vl_feature = self.vl_model(vl_src)
-            
-            outputs = self.mlp(vl_feature)
+
         else:
             visual_feature = visual_src  # global pool without cls token [B, vl_dim]
             
@@ -126,10 +144,14 @@ class fuse_dna_model(nn.Module):
                 text_feature = text_src[:,1:].mean(dim=1) # TODO handle padding
             else:
                 raise NotImplementedError(f"Unsupported pooling method: {self.pooling_method}")
-            if self.vit2bert_proj:
-                visual_feature = self.visual2text_proj(visual_feature)
-            vl_feature = torch.cat([visual_feature,text_feature],dim=-1)
-            outputs = self.mlp(vl_feature)
+            if self.gated_fuse:
+                vl_feature = self.gate_fuse(visual_feature, text_feature)
+            else:
+                if self.vit2bert_proj:
+                    visual_feature = self.visual2text_proj(visual_feature)
+                vl_feature = torch.cat([visual_feature,text_feature],dim=-1)
+        
+        outputs = self.mlp(vl_feature)
         return outputs
     
     @torch.jit.ignore
@@ -142,20 +164,76 @@ class fuse_dna_model(nn.Module):
         no_decay = ['visualmodel.cls_token', 'visualmodel.pos_embed']
         return set(no_decay)
 
+
+class Gate(nn.Module):
+    def __init__(self, x1_dim, x2_dim):
+        super().__init__()
+        self.proj = nn.Linear(x2_dim, x1_dim)
+        self.wz = nn.Linear(x1_dim * 2, x1_dim)
+    
+    def forward(self, x1, x2):
+        x2 = self.proj(x2)
+        gate_lambda = self.wz(torch.cat([x1, x2], dim=1)).sigmoid()
+        out = x1 + gate_lambda * x2
+        return out
+
+
+class Gate1(nn.Module):
+    def __init__(self, x1_dim, x2_dim):
+        super().__init__()
+        self.proj = nn.Linear(x2_dim, x1_dim)
+        self.wz = nn.Linear(x1_dim * 2, x1_dim)
+    
+    def forward(self, x1, x2):
+        x2 = self.proj(x2)
+        gate_lambda = self.wz(torch.cat([x1, x2], dim=1)).sigmoid()
+        out = (1 - gate_lambda) * x1 + gate_lambda * x2
+        return out
+
+
+class Gate2(nn.Module):
+    def __init__(self, x1_dim, x2_dim):
+        super().__init__()
+        self.proj = nn.Linear(x2_dim, x1_dim)
+        self.wz = nn.Linear(x1_dim * 2, 1)
+    
+    def forward(self, x1, x2):
+        x2 = self.proj(x2)
+        gate_lambda = self.wz(torch.cat([x1, x2], dim=1)).sigmoid()
+        out = x1 + gate_lambda * x2
+        return out
+
+
+class Gate3(nn.Module):
+    def __init__(self, x1_dim, x2_dim):
+        super().__init__()
+        self.proj = nn.Linear(x2_dim, x1_dim)
+        self.wz = nn.Linear(x1_dim, x1_dim)
+    
+    def forward(self, x1, x2):
+        x2 = self.proj(x2)
+        gate_lambda = self.wz(x1).sigmoid()
+        out = x1 + gate_lambda * x2
+        return out
+
+
+class Gate4(nn.Module):
+    def __init__(self, x1_dim, x2_dim):
+        super().__init__()
+        self.proj = nn.Linear(x2_dim, x1_dim)
+        self.wz = nn.Linear(x1_dim, 1)
+    
+    def forward(self, x1, x2):
+        x2 = self.proj(x2)
+        gate_lambda = self.wz(x1).sigmoid()
+        out = x1 + gate_lambda * x2
+        return out
+
+
 class Classification_Head(nn.Module):
-    def __init__(self,args):
+    def __init__(self, vl_dim, all_head_trunc, no_norm_before_head):
         super(Classification_Head,self).__init__()
-        self.no_norm_before_head = args.no_norm_before_head
-        self.global_pooling_vit_bert =  args.global_pooling_vit_bert
-        self.vit2bert_proj = args.vit2bert_proj
-
-        if self.vit2bert_proj:
-            vl_dim = 2 * args.bert_embed_dim
-        elif not self.global_pooling_vit_bert:
-            vl_dim = args.vl_hidden_dim
-        elif self.global_pooling_vit_bert and not self.vit2bert_proj:
-            vl_dim = args.bert_embed_dim + args.vit_embed_dim
-
+        self.no_norm_before_head = no_norm_before_head
         self.head = torch.nn.Linear(vl_dim, 5)
         self.head2 = torch.nn.Linear(self.head.in_features + self.head.out_features, 44)
         self.head3 = torch.nn.Linear(self.head2.in_features + self.head2.out_features, 156)
@@ -166,7 +244,7 @@ class Classification_Head(nn.Module):
             self.fc_norm3 = nn.LayerNorm(self.head3.in_features)
 
         trunc_normal_(self.head.weight, std=2e-5)
-        if args.all_head_trunc:
+        if all_head_trunc:
             trunc_normal_(self.head2.weight, std=2e-5)
             trunc_normal_(self.head3.weight, std=2e-5)
     
@@ -200,7 +278,11 @@ def build_vl_transformer(args):
     )
 
 def build_bert_model(args):
-    bert = BertModel.from_pretrained(args.bert_resume,add_pooling_layer=(args.pooling_method=="pooler_output"))
+    if args.bert_resume:
+        bert = BertModel.from_pretrained(args.bert_resume,add_pooling_layer=(args.pooling_method=="pooler_output"))
+    else:
+        config = BertConfig.from_json_file("./bertax_pytorch/config.json")
+        bert = BertModel(config, add_pooling_layer=(args.pooling_method == "pooler_output"))
     return bert
 
 

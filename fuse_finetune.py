@@ -14,13 +14,14 @@ import sys
 from typing import Iterable, Optional
 import torch
 from timm.data import Mixup
-from util.metrics import accuracy, macro_average_precision, plot_roc, plot_pr_curve, micro_average_precision, weighted_macro_average_precision, weighted_micro_average_precision
+from util.metrics import accuracy, macro_average_precision, compute_roc,plot_roc, plot_pr_curve, micro_average_precision, weighted_macro_average_precision, weighted_micro_average_precision
 import util.misc as misc
 import util.lr_sched as lr_sched
 # from torchmetrics import Accuracy
 import os
 import numpy as np
 import torch.nn.functional as F
+
 def create_csv(csv_path):
     
     with open(csv_path, 'a+') as f:
@@ -175,9 +176,9 @@ def evaluate(args, data_loader, model, device):
     outputs = [[], [], []]
     targets = [[], [], []]
     for batch in metric_logger.log_every(data_loader, 40, header):
-        images = batch[0]
-        target = batch[-1]
-        to_device(images, device)
+        samples = batch[0]
+        target = batch[1]
+        to_device(samples, device)
             
         target1, target2, target3 = target
         targets[0].extend(target1)
@@ -187,7 +188,7 @@ def evaluate(args, data_loader, model, device):
             target2.to(device, non_blocking=True), target3.to(device, non_blocking=True)
         # compute output
         with torch.amp.autocast('cuda', enabled=args.amp):
-            output = model(images)
+            output = model(samples)
             outputs[0].extend(output[0])
             outputs[1].extend(output[1])
             outputs[2].extend(output[2])
@@ -214,7 +215,16 @@ def evaluate(args, data_loader, model, device):
 
         y_pred = F.softmax(y_pred.clone().detach().float(), dim=-1).numpy()
         y_pred_max = np.argmax(y_pred, axis=-1)
-        
+        # if args.eval:
+        #     if "lr" in args.resume:
+        #         torch.save(targets,os.path.join(args.output_dir,'lr_targets.pt'))
+        #         torch.save(outputs,os.path.join(args.output_dir,'lr_outputs.pt'))
+        #     else:
+        #         torch.save(targets,os.path.join(args.output_dir,'targets.pt'))
+        #         torch.save(outputs,os.path.join(args.output_dir,'outputs.pt'))
+        # bert no prtrain np.float64(77.09313560207956), np.float64(74.10604592475511), np.float64(75.10317073198426)
+        # 去掉unknown vit no prertain(np.float64(83.9320768509343), np.float64(80.38444245297221), np.float64(81.62940612553942))
+        # no pretrain (np.float64(81.75344249722707), np.float64(76.07827878568477), np.float64(77.99760910057618))
         macro_avep, aver, avef = macro_average_precision(y_pred_max, y_true)
         
         micro_avep = micro_average_precision(y_pred_max, y_true)
@@ -229,7 +239,12 @@ def evaluate(args, data_loader, model, device):
         if args.eval:
             # plot_roc(args, rank, torch.stack(targets[i]).cpu(), torch.stack(outputs[i]).cpu(), all_curves=True)
             # plot_pr_curve(args, rank, torch.stack(targets[i]).cpu(), torch.stack(outputs[i]).cpu())
-            log = [args.kmer, args.data, rank, acc1.item(), acc5.item(), macro_avep, micro_avep, weighted_macro, weighted_micro, aver, avef, metric_logger.__getattr__('loss{}'.format(i)).global_avg]
+            fpr, tpr, roc_auc = compute_roc(args,y_pred,y_true)
+        # plot_roc(args, rank, torch.stack(targets[i]).cpu(), torch.stack(outputs[i]).cpu(), all_curves=True)
+        # plot_pr_curve(args, rank, torch.stack(targets[i]).cpu(), torch.stack(outputs[i]).cpu())
+            log = [args.kmer, args.data, rank, acc1.item(), acc5.item(), macro_avep, micro_avep, weighted_macro, weighted_micro, aver, avef, metric_logger.__getattr__('loss{}'.format(i)).global_avg,roc_auc['micro']]
+
+            # log = [args.kmer, args.data, rank, acc1.item(), acc5.item(), macro_avep, micro_avep, weighted_macro, weighted_micro, aver, avef, metric_logger.__getattr__('loss{}'.format(i)).global_avg]
             write_log(args.output_dir, log)
 
         metric_logger.meters['avep{}'.format(i)].update(macro_avep)
@@ -239,3 +254,102 @@ def evaluate(args, data_loader, model, device):
         metric_logger.meters['acc5_{}'.format(i)].update(acc5.item())
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
+
+@torch.no_grad()
+def hook(args, data_loader, model, device):
+    metric_logger = misc.MetricLogger(delimiter="  ")
+    header = 'Hook:'
+    model.eval()
+
+    visual_features = []
+    text_features = []
+    fused_features = []
+    lambda_features = []
+    target1, target2, target3 = [], [], []
+
+    # input_block = []
+    fmap_block = []
+    def forward_hook(module, data_input, data_output):
+        fmap_block.append(data_output)
+        # input_block.append(data_input.detach().cpu())
+
+    model.textmodel.register_forward_hook(forward_hook)
+    model.visualmodel.register_forward_hook(forward_hook)
+    model.gate_fuse.register_forward_hook(forward_hook)
+    model.gate_fuse.wz.register_forward_hook(forward_hook)
+    
+
+    for batch in metric_logger.log_every(data_loader, 40, header):
+        samples = batch[0]
+        target = batch[1]
+        to_device(samples, device)
+            
+        target1.extend(target[0])
+        target2.extend(target[1])
+        target3.extend(target[2])
+        
+
+        # target1, target2, target3 = target1.to(device, non_blocking=True), \
+            # target2.to(device, non_blocking=True), target3.to(device, non_blocking=True)
+        # compute output
+        with torch.amp.autocast('cuda', enabled=args.amp):
+            _ = model(samples)
+
+            if args.pooling_method == "cls_output":
+                text_feature = fmap_block[1].last_hidden_state[:, 0].detach().cpu()
+            elif args.pooling_method == "pooler_output":
+                text_feature = fmap_block[1].last_hidden_state.pooler_output.detach().cpu() # [B, vl_dim]
+            elif args.pooling_method == "average_pooling":
+                text_feature = fmap_block[1].last_hidden_state[:,1:].mean(dim=1).detach().cpu() # TODO handle padding
+
+
+            visual_features.extend(fmap_block[0].detach().cpu())
+            text_features.extend(text_feature)
+            fused_features.extend(fmap_block[2].detach().cpu())
+            lambda_features.extend(fmap_block[3].sigmoid().cpu())
+            fmap_block.pop()
+            fmap_block.pop()
+            fmap_block.pop()
+            fmap_block.pop()
+
+    visual_features = torch.stack(visual_features)
+    text_features = torch.stack(text_features)
+    fused_features = torch.stack(fused_features)
+    lambda_features = torch.stack(lambda_features)
+
+    torch.save(visual_features,os.path.join(args.output_dir,'visual_features.pt'))
+    torch.save(text_features,os.path.join(args.output_dir,'text_features.pt'))
+    torch.save(fused_features,os.path.join(args.output_dir,'fused_features.pt'))
+    torch.save(lambda_features,os.path.join(args.output_dir,'lambda_features.pt'))
+    torch.save([target1,target2,target3],os.path.join(args.output_dir,'targets.pt'))
+
+
+
+torch.no_grad()
+def evaluate_time(args, data_loader, model, device):
+    criterion = torch.nn.CrossEntropyLoss()
+
+    metric_logger = misc.MetricLogger(delimiter="  ")
+    header = 'Test:'
+    # switch to evaluation mode
+    model.eval()
+    outputs = [[], [], []]
+    targets = [[], [], []]
+
+    with torch.cuda.amp.autocast():
+        import time
+        start_time = time.perf_counter()
+        for batch in metric_logger.log_every(data_loader, 40, header):
+            samples = batch[0]
+            target = batch[1]
+            to_device(samples, device)
+                
+            target1, target2, target3 = target
+            target1, target2, target3 = target1.to(device, non_blocking=True), \
+                target2.to(device, non_blocking=True), target3.to(device, non_blocking=True)
+            # compute output
+            with torch.amp.autocast('cuda', enabled=args.amp):
+                output = model(samples)
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        print(f"Elapsed time: {elapsed_time} seconds")

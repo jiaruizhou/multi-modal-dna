@@ -293,36 +293,39 @@ def save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler):
         model.save_checkpoint(save_dir=args.output_dir, tag="checkpoint-%s" % epoch_name, client_state=client_state)
 
 def load_vit_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
-    checkpoint = torch.load(args.vit_resume, map_location='cpu')
+    if args.vit_resume:
+        checkpoint = torch.load(args.vit_resume, map_location='cpu')
 
-    print("Load pre-trained checkpoint from: %s" % args.vit_resume)
-    checkpoint_model = checkpoint['model']
-    # state_dict = model_without_ddp.state_dict()
-    # for k in ['head.weight', 'head.bias']:
-    #     if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
-    #         print(f"Removing key {k} from pretrained checkpoint")
-    #         del checkpoint_model[k]
+        print("Load pre-trained checkpoint from: %s" % args.vit_resume)
+        checkpoint_model = checkpoint['model']
+        # state_dict = model_without_ddp.state_dict()
+        # for k in ['head.weight', 'head.bias']:
+        #     if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+        #         print(f"Removing key {k} from pretrained checkpoint")
+        #         del checkpoint_model[k]
 
-    # interpolate position embedding
-    interpolate_pos_embed(model_without_ddp, checkpoint_model)
+        # interpolate position embedding
+        interpolate_pos_embed(model_without_ddp, checkpoint_model)
 
-    # load pre-trained model
-    msg = model_without_ddp.load_state_dict(checkpoint_model, strict=False)
-    print(msg)
-    # assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
+        # load pre-trained model
+        msg = model_without_ddp.load_state_dict(checkpoint_model, strict=False)
+        print(msg)
+        # assert set(msg.missing_keys) == {'head.weight', 'head.bias'}
 
-    # manually initialize fc layer
-    # trunc_normal_(model_without_ddp.head.weight, std=2e-5)
+        # manually initialize fc layer
+        # trunc_normal_(model_without_ddp.head.weight, std=2e-5)
 
-    # print(msg)
-
+        # print(msg)
+    else:
+        print("No checkpoint for ViT")
+        
 def load_model(args, model_without_ddp, optimizer=None, loss_scaler=None):
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
+        model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         print("Resume checkpoint %s" % args.resume)
         if 'optimizer' in checkpoint and 'epoch' in checkpoint and not (hasattr(args, 'eval') and args.eval):
             optimizer.load_state_dict(checkpoint['optimizer'])

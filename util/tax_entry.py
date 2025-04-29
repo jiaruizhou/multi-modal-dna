@@ -78,11 +78,7 @@ phyl_dict = {
     'Spirochaetes': 43
 }
 
-p=[
-    'Actinobacteria', 'Apicomplexa', 'Aquificae', 'Arthropoda', 'Artverviricota', 'Ascomycota', 'Bacillariophyta', 'Bacteroidetes', 'Basidiomycota', 'Candidatus Thermoplasmatota', 'Chlamydiae', 'Chlorobi', 'Chloroflexi', 'Chlorophyta', 'Chordata',
-    'Crenarchaeota', 'Cyanobacteria', 'Deinococcus-Thermus', 'Euglenozoa', 'Euryarchaeota', 'Evosea', 'Firmicutes', 'Fusobacteria', 'Gemmatimonadetes', 'Kitrinoviricota', 'Lentisphaerae', 'Mollusca', 'Negarnaviricota', 'Nematoda', 'Nitrospirae',
-    'Peploviricota', 'Pisuviricota', 'Planctomycetes', 'Platyhelminthes', 'Proteobacteria', 'Rhodophyta', 'Spirochaetes', 'Streptophyta', 'Tenericutes', 'Thaumarchaeota', 'Thermotogae', 'Uroviricota', 'Verrucomicrobia'
-]
+
 genus_dict = {
     'Microcaecilia': 0,
     'Roseiflexus': 1,

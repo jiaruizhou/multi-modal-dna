@@ -38,7 +38,7 @@ from util.misc import NativeScalerWithGradNormCount as NativeScaler
 import models.models_vit as models_vit
 from models.model_fuse import fuse_dna_model
 
-from fuse_finetune import train_one_epoch, evaluate
+from fuse_finetune import train_one_epoch, evaluate, hook, evaluate_time
 
 from util.custom_datasets import Visual_Text_Dataset
 from util.tax_entry import annotate_predictions
@@ -54,7 +54,7 @@ def get_args_parser():
     # Optimizer parameters
     parser.add_argument('--clip_grad', type=float, default=None, metavar='NORM', help='Clip gradient norm (default: None, no clipping)')
     parser.add_argument('--weight_decay', type=float, default=0.05, help='weight decay (default: 0.05)')
-    parser.add_argument('--lr', type=float, default=None, metavar='LR', help='learning rate (absolute lr)')
+    parser.add_argument('--lr', type=float, default=1e-4, metavar='LR', help='learning rate (absolute lr)')
     parser.add_argument('--blr', type=float, default=1e-3, metavar='LR', help='base learning rate: absolute_lr = base_lr * total_batch_size / 256')
     parser.add_argument('--layer_decay', type=float, default=0.75, help='layer-wise lr decay from ELECTRA/BEiT')
     parser.add_argument('--min_lr', type=float, default=1e-6, metavar='LR', help='lower lr bound for cyclic schedulers that hit 0')
@@ -94,6 +94,7 @@ def get_args_parser():
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N', help='start epoch')
     parser.add_argument('--eval', action='store_true', help='Perform evaluation only')
+    parser.add_argument('--hook', action='store_true', help='Perform evaluation only')
     parser.add_argument('--dist_eval', action='store_true', default=False, help='Enabling distributed evaluation (recommended during training for faster monitor')
     parser.add_argument('--num_workers', default=0, type=int)
     parser.add_argument('--pin_mem', action='store_true', help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
@@ -159,22 +160,24 @@ def get_args_parser():
     parser.add_argument('--amp', action='store_true', help='Enable Automatic Mixed Precision')
     parser.add_argument('--loss_scale', action='store_true', help='Enable loss scaling')
     parser.add_argument('--vit2bert_proj',action='store_true', help='use a  linear projection from vit to bert feature')
-    parser.add_argument('--train_contrastive',action='store_true')
+    # parser.add_argument('--train_contrastive',action='store_true')
 
     
     parser.add_argument('--no_norm_before_head',action='store_true', help='do not use layernorm all mlp head')
 
-    parser.add_argument('--contrastive_resume', default='', help='resume from fuse model checkpoint')
-
-
+    # parser.add_argument('--contrastive_resume', default='', help='resume from fuse model checkpoint')
+    parser.add_argument('--gated_fuse',action='store_true', help='fuse multimodal feautures using gate')
+    parser.add_argument('--gate_num',default=0, type=int, help='fuse multimodal feautures using gate type')
+    parser.add_argument('--eval_time', action='store_true', help='Perform evaluation time only')
     return parser
+
 
 
 def main(args):
     if not args.pred:
         args.data_path = os.path.join(args.data_path, args.data + "/")
 
-    args.output_dir = os.path.join(args.output_dir, args.model,args.data)
+    args.output_dir = os.path.join(args.output_dir, args.model, args.data)
     
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
@@ -185,7 +188,11 @@ def main(args):
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
 
-    device = torch.device(args.device)
+    if args.eval_time:
+        device = torch.device("cpu")
+        torch.set_num_threads(32) 
+    else:
+        device = torch.device(args.device)
 
     # fix the seed for reproducibility
     # We do not add RANK to seed for correct data spliting in distributed training.
@@ -296,10 +303,14 @@ def main(args):
         criterion = torch.nn.CrossEntropyLoss()
 
     print("criterion = %s" % str(criterion))
-
-    
-    
+    if args.hook:
+        hook(args, data_loader_val, fuse_model, device)
+        exit(1)
     if args.eval:
+        if args.eval_time:
+            args.batch_size = 1
+            evaluate_time(args, data_loader_val, fuse_model, device)
+            exit(2)
         test_stats = evaluate(args, data_loader_val, fuse_model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images for superkingdom: {test_stats['acc1_0']:.1f}%")
         print(f"Accuracy of the network on the {len(dataset_val)} test images for phylum: {test_stats['acc1_1']:.1f}%")
